@@ -1,0 +1,5 @@
+tkinterweb
+screeninfo
+pywin32
+pandas
+python-socketio

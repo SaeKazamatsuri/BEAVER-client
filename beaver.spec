@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('bubble.html', '.'), ('templates', 'templates'), ('static', 'static'), ('sounds', 'sounds')],
+    datas=[('bubble.html', '.')],
     hiddenimports=['engineio.async_drivers.threading', 'socketio.async_drivers.threading', 'flask_socketio', 'tkinterweb', 'screeninfo', 'playsound'],
     hookspath=[],
     hooksconfig={},
