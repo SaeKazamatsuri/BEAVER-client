@@ -14,6 +14,7 @@ import win32gui
 import win32con
 import pandas as pd
 import socketio
+import openpyxl
 
 BASE_DIR = getattr(__import__("sys"), "_MEIPASS", os.path.abspath("."))
 BUBBLE_HTML_PATH = os.path.join(BASE_DIR, "bubble.html")

@@ -3,3 +3,5 @@ screeninfo
 pywin32
 pandas
 python-socketio
+requests
+openpyxl
