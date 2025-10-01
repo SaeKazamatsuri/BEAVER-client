@@ -18,6 +18,7 @@ import openpyxl
 
 BASE_DIR = getattr(__import__("sys"), "_MEIPASS", os.path.abspath("."))
 BUBBLE_HTML_PATH = os.path.join(BASE_DIR, "bubble.html")
+STAMP_HTML_PATH = os.path.join(BASE_DIR, "stamp.html")
 
 RELAY_SERVER_URL = os.environ.get("RELAY_SERVER_URL", "https://beaver.works")
 RELAY_SOCKETIO_PATH = os.environ.get("RELAY_SOCKETIO_PATH", "/socket.io")
@@ -36,6 +37,8 @@ menu_status_var: tk.StringVar | None = None
 menu_session_var: tk.StringVar | None = None
 menu_current_session_var: tk.StringVar | None = None
 
+_server_offset_lock = threading.Lock()
+_server_offset: float | None = None
 
 def _safe_set(var: tk.StringVar | None, text: str):
     if root is None or var is None:
@@ -45,6 +48,50 @@ def _safe_set(var: tk.StringVar | None, text: str):
     except Exception:
         pass
 
+def _update_server_offset(ts_seconds: float | None):
+    global _server_offset
+    if ts_seconds is None:
+        return
+    with _server_offset_lock:
+        _server_offset = ts_seconds - time.monotonic()
+
+def server_now_seconds() -> float:
+    with _server_offset_lock:
+        if _server_offset is None:
+            return time.monotonic()
+        return time.monotonic() + _server_offset
+
+def _coerce_ts_seconds(entry: dict) -> float | None:
+    ts = entry.get("ts") or entry.get("server_ts")
+    if isinstance(ts, (int, float)):
+        x = float(ts)
+        if x > 1e12:
+            return x / 1000.0
+        if x > 1e10:
+            return x / 1000.0
+        return x
+    tiso = entry.get("time_iso") or entry.get("server_time_iso") or entry.get("server_time")
+    if isinstance(tiso, str):
+        try:
+            s = tiso.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo:
+                return dt.timestamp()
+        except Exception:
+            pass
+    return None
+
+def _annotate_entry(entry: dict) -> dict:
+    e = dict(entry)
+    ts = _coerce_ts_seconds(e)
+    if ts is not None:
+        _update_server_offset(ts)
+        e["_ts"] = ts
+    is_stamp = bool(e.get("stamp_url") or e.get("stamp"))
+    if is_stamp:
+        base_ts = ts if ts is not None else server_now_seconds()
+        e["_expires_at"] = base_ts + 60.0
+    return e
 
 def _on_history(data):
     if isinstance(data, list):
@@ -58,33 +105,27 @@ def _on_history(data):
         for m in data:
             message_queue.put(m)
 
-
 def _on_new_comment(entry):
     if isinstance(entry, dict):
         message_log.append(entry)
         message_queue.put(entry)
 
-
 @sio.on("history")
 def history_handler(data):
     _on_history(data)
 
-
 @sio.on("new_comment")
 def new_comment_handler(data):
     _on_new_comment(data)
-
 
 @sio.on("connect")
 def on_connect():
     _safe_set(menu_status_var, "接続済み")
     _safe_set(menu_current_session_var, f"現在のセッション: {CURRENT_SESSION}")
 
-
 @sio.on("disconnect")
 def on_disconnect():
     _safe_set(menu_status_var, "未接続")
-
 
 def connect_session(session_name: str):
     def _do_connect():
@@ -113,9 +154,7 @@ def connect_session(session_name: str):
                 messagebox.showerror("接続エラー", str(e))
             except Exception:
                 pass
-
     threading.Thread(target=_do_connect, daemon=True).start()
-
 
 def set_always_on_top(hwnd):
     win32gui.SetWindowPos(
@@ -127,7 +166,6 @@ def set_always_on_top(hwnd):
         0,
         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
     )
-
 
 def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     global menu_status_var, menu_session_var, menu_current_session_var
@@ -205,7 +243,6 @@ def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     )
     tk.Button(menu, text="アプリ終了", command=confirm_exit).pack(pady=12)
 
-
 def main():
     global root
     root = tk.Tk()
@@ -241,6 +278,12 @@ def main():
 
     with open(BUBBLE_HTML_PATH, encoding="utf-8") as fp:
         bubble_html = fp.read()
+    try:
+        with open(STAMP_HTML_PATH, encoding="utf-8") as fp:
+            stamp_html_src = fp.read()
+    except FileNotFoundError:
+        stamp_html_src = ""
+
     last_html = [""]
 
     style_block = """
@@ -248,6 +291,8 @@ def main():
 html, body { overflow-y: auto; overflow-x: hidden; -ms-overflow-style: none; scrollbar-width: none; }
 body::-webkit-scrollbar { width: 0; height: 0; }
 *::-webkit-scrollbar { width: 0; height: 0; }
+.stamp-area { margin-top: 8px; }
+.stamp-image { width: 33%; height: auto; display: block; }
 </style>
 """.strip()
 
@@ -261,26 +306,54 @@ body::-webkit-scrollbar { width: 0; height: 0; }
     def update_comments():
         try:
             while True:
-                messages.append(message_queue.get_nowait())
+                raw = message_queue.get_nowait()
+                e = _annotate_entry(raw)
+                messages.append(e)
         except queue.Empty:
             pass
-        body = "\n".join(
-            f"""
-            <div class="comment-wrapper">
-              <div class="shadow-box"></div>
-              <div class="comment-box">
-                <div class="name-label">{html.escape(m.get('name',''))}</div>
-                <div class="comment-name-time">
-                  <span>　</span>
-                  <span style='font-weight:normal;color:#666;'>{html.escape(m.get('time','')[11:16] if isinstance(m.get('time',''), str) else '')}</span>
+
+        now_s = server_now_seconds()
+        items = []
+        for m in reversed(messages):
+            name = html.escape(m.get("name", ""))
+            tstr = str(m.get("time", ""))
+            time_part = f"<span>　</span><span style='font-weight:normal;color:#666;'>{tstr}</span>"
+            stamp_rel = m.get("stamp_url") or m.get("stamp")
+            if stamp_rel:
+                exp = m.get("_expires_at")
+                if isinstance(exp, (int, float)) and now_s > float(exp):
+                    continue
+                src = stamp_rel
+                if isinstance(src, str) and src.startswith("/"):
+                    src = RELAY_SERVER_URL.rstrip("/") + src
+                src = html.escape(src or "")
+                item = f"""
+                <div class="comment-wrapper">
+                  <div class="shadow-box"></div>
+                  <div class="comment-box">
+                    <div class="name-label">{name}</div>
+                    <div class="comment-name-time">{time_part}</div>
+                    <div class="stamp-area"><img src="{src}" alt="stamp" class="stamp-image"></div>
+                    <div class="like"></div>
+                  </div>
                 </div>
-                <div class="comment-text">{html.escape(m.get('text',''))}</div>
-                <div class="like"></div>
-              </div>
-            </div>
-            """
-            for m in reversed(messages)
-        )
+                """
+            else:
+                text = html.escape(m.get("text", ""))
+                item = f"""
+                <div class="comment-wrapper">
+                  <div class="shadow-box"></div>
+                  <div class="comment-box">
+                    <div class="name-label">{name}</div>
+                    <div class="comment-name-time">{time_part}</div>
+                    <div class="comment-text">{text}</div>
+                    <div class="like"></div>
+                  </div>
+                </div>
+                """
+            items.append(item)
+
+        body = "\n".join(items)
         full_html = base_html.replace("</body>", f"{body}</body>")
         if full_html != last_html[0]:
             try:
@@ -307,7 +380,6 @@ body::-webkit-scrollbar { width: 0; height: 0; }
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()
