@@ -8,6 +8,7 @@ from datetime import datetime
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import tkinter.ttk as ttk
 from tkinterweb import HtmlFrame
 from screeninfo import get_monitors
 import win32gui
@@ -81,13 +82,25 @@ def _coerce_ts_seconds(entry: dict) -> float | None:
             pass
     return None
 
+def _is_stamp(entry: dict) -> bool:
+    return bool(entry.get("stamp_url") or entry.get("stamp"))
+
+def _should_drop_on_arrival(entry: dict) -> bool:
+    if not _is_stamp(entry):
+        return False
+    ts = _coerce_ts_seconds(entry)
+    if ts is None:
+        return False
+    _update_server_offset(ts)
+    return (server_now_seconds() - ts) >= 60.0
+
 def _annotate_entry(entry: dict) -> dict:
     e = dict(entry)
     ts = _coerce_ts_seconds(e)
     if ts is not None:
         _update_server_offset(ts)
         e["_ts"] = ts
-    is_stamp = bool(e.get("stamp_url") or e.get("stamp"))
+    is_stamp = _is_stamp(e)
     if is_stamp:
         base_ts = ts if ts is not None else server_now_seconds()
         e["_expires_at"] = base_ts + 60.0
@@ -95,18 +108,24 @@ def _annotate_entry(entry: dict) -> dict:
 
 def _on_history(data):
     if isinstance(data, list):
+        filtered = []
+        for m in data:
+            if not _should_drop_on_arrival(m):
+                filtered.append(m)
         message_log.clear()
-        message_log.extend(data)
+        message_log.extend(filtered)
         while True:
             try:
                 message_queue.get_nowait()
             except queue.Empty:
                 break
-        for m in data:
+        for m in filtered:
             message_queue.put(m)
 
 def _on_new_comment(entry):
     if isinstance(entry, dict):
+        if _should_drop_on_arrival(entry):
+            return
         message_log.append(entry)
         message_queue.put(entry)
 
@@ -166,6 +185,54 @@ def set_always_on_top(hwnd):
         0,
         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
     )
+
+def _open_history_window(root_ref: tk.Tk):
+    win = tk.Toplevel(root_ref)
+    win.title("コメント履歴")
+    win.geometry("560x600")
+
+    frame = ttk.Frame(win)
+    frame.pack(expand=True, fill="both")
+
+    columns = ("time", "name", "content")
+    tree = ttk.Treeview(frame, columns=columns, show="headings")
+    tree.heading("time", text="時刻")
+    tree.heading("name", text="名前")
+    tree.heading("content", text="内容")
+    tree.column("time", width=120, anchor="w")
+    tree.column("name", width=120, anchor="w")
+    tree.column("content", width=300, anchor="w")
+
+    vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=vsb.set)
+    tree.pack(side="left", expand=True, fill="both")
+    vsb.pack(side="right", fill="y")
+
+    last_count = [-1]
+
+    def make_row(e: dict) -> tuple[str, str, str]:
+        t = str(e.get("time", "")) if e.get("time") is not None else ""
+        n = str(e.get("name", "")) if e.get("name") is not None else ""
+        if e.get("stamp_url") or e.get("stamp"):
+            s = e.get("stamp_url") or e.get("stamp")
+            c = f"スタンプ: {s}"
+        else:
+            c = str(e.get("text", "")) if e.get("text") is not None else ""
+        return (t, n, c)
+
+    def refresh():
+        if not win.winfo_exists():
+            return
+        current_len = len(message_log)
+        if current_len != last_count[0]:
+            tree.delete(*tree.get_children())
+            snapshot = list(message_log)
+            for e in snapshot:
+                tree.insert("", "end", values=make_row(e))
+            last_count[0] = current_len
+        win.after(500, refresh)
+
+    refresh()
 
 def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     global menu_status_var, menu_session_var, menu_current_session_var
@@ -232,15 +299,10 @@ def create_menu_window(switch_display_callback, root_ref: tk.Tk):
             pass
         root_ref.destroy()
 
-    tk.Button(menu, text="表示モニター切替", command=switch_display_callback).pack(
-        pady=8
-    )
-    tk.Button(menu, text="CSV で保存", command=lambda: export_dialog("csv")).pack(
-        pady=5
-    )
-    tk.Button(menu, text="Excel で保存", command=lambda: export_dialog("xlsx")).pack(
-        pady=5
-    )
+    tk.Button(menu, text="表示モニター切替", command=switch_display_callback).pack(pady=8)
+    tk.Button(menu, text="コメント履歴", command=lambda: _open_history_window(root_ref)).pack(pady=5)
+    tk.Button(menu, text="CSV で保存", command=lambda: export_dialog("csv")).pack(pady=5)
+    tk.Button(menu, text="Excel で保存", command=lambda: export_dialog("xlsx")).pack(pady=5)
     tk.Button(menu, text="アプリ終了", command=confirm_exit).pack(pady=12)
 
 def main():
@@ -267,9 +329,7 @@ def main():
     wrapper = tk.Frame(root, bg="#fefefe")
     wrapper.pack(expand=True, fill="both")
 
-    html_frame = HtmlFrame(
-        wrapper, horizontal_scrollbar=False, vertical_scrollbar=False
-    )
+    html_frame = HtmlFrame(wrapper, horizontal_scrollbar=False, vertical_scrollbar=False)
     html_frame.pack(expand=True, fill="both")
 
     for child in html_frame.winfo_children():
