@@ -2,8 +2,13 @@ import os
 import io
 import html
 import queue
+import random
 import threading
 import time
+import uuid
+import base64
+import math
+from collections import deque
 from datetime import datetime
 
 import tkinter as tk
@@ -16,17 +21,39 @@ import win32con
 import pandas as pd
 import socketio
 import openpyxl
+import requests
 
 BASE_DIR = getattr(__import__("sys"), "_MEIPASS", os.path.abspath("."))
 BUBBLE_HTML_PATH = os.path.join(BASE_DIR, "bubble.html")
-STAMP_HTML_PATH = os.path.join(BASE_DIR, "stamp.html")
 
 RELAY_SERVER_URL = os.environ.get("RELAY_SERVER_URL", "https://beaver.works")
 RELAY_SOCKETIO_PATH = os.environ.get("RELAY_SOCKETIO_PATH", "/socket.io")
 
+STAMP_BALLOON_LIFETIME_SEC = 8.0
+STAMP_BALLOON_MIN_SPEED_PX = 70.0
+STAMP_BALLOON_MAX_SPEED_PX = 110.0
+STAMP_BALLOON_MAX_ACTIVE = 8
+STAMP_BALLOON_MAX_WIDTH = 220
+STAMP_BALLOON_START_PADDING = 40
+STAMP_BALLOON_WOBBLE_AMPLITUDE = 25.0
+STAMP_BALLOON_WOBBLE_FREQ_MIN = 0.6
+STAMP_BALLOON_WOBBLE_FREQ_MAX = 1.2
+STAMP_RECENT_WINDOW_SEC = 20.0
+STAMP_DOWNLOAD_TIMEOUT = 10
+OVERLAY_TRANSPARENT_COLOR = "#00ff00"
+STAMP_ID_CACHE_SIZE = 128
+
 message_queue = queue.Queue()
 message_log: list[dict] = []
 messages: list[dict] = []
+
+overlay_window: tk.Toplevel | None = None
+overlay_canvas: tk.Canvas | None = None
+overlay_balloons: list[dict] = []
+_overlay_animating = False
+_overlay_last_tick = [time.monotonic()]
+_recent_stamp_ids: deque[str] = deque()
+_recent_stamp_ids_set: set[str] = set()
 
 sio = socketio.Client(
     reconnection=True, reconnection_attempts=0, logger=False, engineio_logger=False
@@ -41,6 +68,7 @@ menu_current_session_var: tk.StringVar | None = None
 _server_offset_lock = threading.Lock()
 _server_offset: float | None = None
 
+
 def _safe_set(var: tk.StringVar | None, text: str):
     if root is None or var is None:
         return
@@ -49,6 +77,7 @@ def _safe_set(var: tk.StringVar | None, text: str):
     except Exception:
         pass
 
+
 def _update_server_offset(ts_seconds: float | None):
     global _server_offset
     if ts_seconds is None:
@@ -56,11 +85,13 @@ def _update_server_offset(ts_seconds: float | None):
     with _server_offset_lock:
         _server_offset = ts_seconds - time.monotonic()
 
+
 def server_now_seconds() -> float:
     with _server_offset_lock:
         if _server_offset is None:
             return time.monotonic()
         return time.monotonic() + _server_offset
+
 
 def _coerce_ts_seconds(entry: dict) -> float | None:
     ts = entry.get("ts") or entry.get("server_ts")
@@ -71,7 +102,11 @@ def _coerce_ts_seconds(entry: dict) -> float | None:
         if x > 1e10:
             return x / 1000.0
         return x
-    tiso = entry.get("time_iso") or entry.get("server_time_iso") or entry.get("server_time")
+    tiso = (
+        entry.get("time_iso")
+        or entry.get("server_time_iso")
+        or entry.get("server_time")
+    )
     if isinstance(tiso, str):
         try:
             s = tiso.replace("Z", "+00:00")
@@ -82,8 +117,10 @@ def _coerce_ts_seconds(entry: dict) -> float | None:
             pass
     return None
 
+
 def _is_stamp(entry: dict) -> bool:
     return bool(entry.get("stamp_url") or entry.get("stamp"))
+
 
 def _should_drop_on_arrival(entry: dict) -> bool:
     if not _is_stamp(entry):
@@ -92,7 +129,8 @@ def _should_drop_on_arrival(entry: dict) -> bool:
     if ts is None:
         return False
     _update_server_offset(ts)
-    return (server_now_seconds() - ts) >= 60.0
+    return (server_now_seconds() - ts) >= STAMP_RECENT_WINDOW_SEC
+
 
 def _annotate_entry(entry: dict) -> dict:
     e = dict(entry)
@@ -100,11 +138,189 @@ def _annotate_entry(entry: dict) -> dict:
     if ts is not None:
         _update_server_offset(ts)
         e["_ts"] = ts
-    is_stamp = _is_stamp(e)
-    if is_stamp:
-        base_ts = ts if ts is not None else server_now_seconds()
-        e["_expires_at"] = base_ts + 60.0
     return e
+
+def _normalize_stamp_src(entry: dict) -> tuple[str, str] | None:
+    stamp_rel = entry.get("stamp_url") or entry.get("stamp")
+    if not stamp_rel:
+        return None
+    src = stamp_rel
+    if isinstance(src, str) and src.startswith("/"):
+        src = RELAY_SERVER_URL.rstrip("/") + src
+    stamp_id = str(
+        entry.get("id") or entry.get("_id") or entry.get("stamp_id") or uuid.uuid4().hex
+    )
+    return stamp_id, src
+
+
+def _enqueue_stamp_balloon(entry: dict):
+    normalized = _normalize_stamp_src(entry)
+    if normalized is None:
+        return
+    stamp_id, url = normalized
+    if stamp_id in _recent_stamp_ids_set:
+        return
+    _recent_stamp_ids.append(stamp_id)
+    _recent_stamp_ids_set.add(stamp_id)
+    while len(_recent_stamp_ids) > STAMP_ID_CACHE_SIZE:
+        old = _recent_stamp_ids.popleft()
+        _recent_stamp_ids_set.discard(old)
+    threading.Thread(
+        target=_download_and_prepare_stamp, args=(stamp_id, url), daemon=True
+    ).start()
+
+
+def _download_and_prepare_stamp(stamp_id: str, url: str):
+    try:
+        resp = requests.get(url, timeout=STAMP_DOWNLOAD_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.content
+    except Exception:
+        return
+    if not data or root is None:
+        return
+
+    def _spawn():
+        _spawn_balloon_from_bytes(stamp_id, data)
+
+    try:
+        root.after(0, _spawn)
+    except Exception:
+        pass
+
+
+def _spawn_balloon_from_bytes(stamp_id: str, data: bytes):
+    if root is None:
+        return
+    _ensure_overlay_window(root)
+    if overlay_canvas is None:
+        return
+    try:
+        encoded = base64.b64encode(data).decode("ascii")
+        photo = tk.PhotoImage(data=encoded)
+    except Exception:
+        return
+
+    width = photo.width()
+    if width <= 0:
+        return
+    if width > STAMP_BALLOON_MAX_WIDTH:
+        factor = max(1, math.ceil(width / STAMP_BALLOON_MAX_WIDTH))
+        try:
+            photo = photo.subsample(factor, factor)
+        except Exception:
+            pass
+
+    overlay_canvas.update_idletasks()
+    canvas_w = overlay_canvas.winfo_width() or root.winfo_width()
+    canvas_h = overlay_canvas.winfo_height() or root.winfo_height()
+    if canvas_w <= 0 or canvas_h <= 0:
+        root.after(120, lambda: _spawn_balloon_from_bytes(stamp_id, data))
+        return
+
+    half_w = photo.width() / 2
+    min_x = STAMP_BALLOON_START_PADDING + half_w
+    max_x = max(min_x + 1, canvas_w - min_x)
+    spawn_x = random.uniform(min_x, max_x)
+    spawn_y = canvas_h + photo.height() / 2 + 12
+
+    canvas_id = overlay_canvas.create_image(
+        spawn_x, spawn_y, image=photo, anchor="center"
+    )
+    balloon = {
+        "stamp_id": stamp_id,
+        "canvas_id": canvas_id,
+        "photo": photo,
+        "vx": random.uniform(-20.0, 20.0),
+        "vy": -random.uniform(STAMP_BALLOON_MIN_SPEED_PX, STAMP_BALLOON_MAX_SPEED_PX),
+        "start": time.monotonic(),
+        "life": STAMP_BALLOON_LIFETIME_SEC,
+        "phase": random.uniform(0.0, math.tau),
+        "wobble": random.uniform(5.0, STAMP_BALLOON_WOBBLE_AMPLITUDE),
+        "freq": random.uniform(
+            STAMP_BALLOON_WOBBLE_FREQ_MIN, STAMP_BALLOON_WOBBLE_FREQ_MAX
+        ),
+    }
+    overlay_balloons.append(balloon)
+    while len(overlay_balloons) > STAMP_BALLOON_MAX_ACTIVE:
+        old = overlay_balloons.pop(0)
+        try:
+            overlay_canvas.delete(old["canvas_id"])
+        except Exception:
+            pass
+
+
+def _ensure_overlay_window(root_ref: tk.Tk):
+    global overlay_window, overlay_canvas, _overlay_animating
+    if overlay_window is not None and overlay_canvas is not None:
+        return
+    overlay = tk.Toplevel(root_ref)
+    overlay.overrideredirect(True)
+    overlay.configure(bg=OVERLAY_TRANSPARENT_COLOR)
+    overlay.attributes("-topmost", True)
+    try:
+        overlay.attributes("-transparentcolor", OVERLAY_TRANSPARENT_COLOR)
+    except tk.TclError:
+        pass
+    try:
+        overlay.wm_attributes("-disabled", True)
+    except tk.TclError:
+        pass
+    canvas = tk.Canvas(
+        overlay, bg=OVERLAY_TRANSPARENT_COLOR, highlightthickness=0, bd=0
+    )
+    canvas.pack(fill="both", expand=True)
+    overlay_window = overlay
+    overlay_canvas = canvas
+    _overlay_animating = True
+    _overlay_last_tick[0] = time.monotonic()
+    canvas.after(16, _overlay_tick)
+
+
+def _update_overlay_geometry(geometry: str, width: int, height: int):
+    if overlay_window is None or overlay_canvas is None:
+        return
+    overlay_window.geometry(geometry)
+    overlay_canvas.config(width=width, height=height)
+
+
+def _overlay_tick():
+    if not _overlay_animating or overlay_canvas is None:
+        return
+    now = time.monotonic()
+    last = _overlay_last_tick[0]
+    dt = max(0.0, min(0.05, now - last))
+    _overlay_last_tick[0] = now
+
+    to_remove: list[dict] = []
+    for balloon in list(overlay_balloons):
+        balloon["phase"] += dt
+        wobble = math.sin(balloon["phase"] * balloon["freq"]) * balloon["wobble"]
+        dx = (balloon["vx"] + wobble) * dt
+        dy = balloon["vy"] * dt
+        overlay_canvas.move(balloon["canvas_id"], dx, dy)
+        coords = overlay_canvas.coords(balloon["canvas_id"])
+        elapsed = now - balloon["start"]
+        if (
+            not coords
+            or elapsed >= balloon["life"]
+            or coords[1] < -balloon["photo"].height()
+        ):
+            to_remove.append(balloon)
+
+    for balloon in to_remove:
+        try:
+            overlay_canvas.delete(balloon["canvas_id"])
+        except Exception:
+            pass
+        try:
+            overlay_balloons.remove(balloon)
+        except ValueError:
+            pass
+
+    if _overlay_animating and overlay_canvas is not None:
+        overlay_canvas.after(16, _overlay_tick)
+
 
 def _on_history(data):
     if isinstance(data, list):
@@ -122,6 +338,7 @@ def _on_history(data):
         for m in filtered:
             message_queue.put(m)
 
+
 def _on_new_comment(entry):
     if isinstance(entry, dict):
         if _should_drop_on_arrival(entry):
@@ -129,22 +346,27 @@ def _on_new_comment(entry):
         message_log.append(entry)
         message_queue.put(entry)
 
+
 @sio.on("history")
 def history_handler(data):
     _on_history(data)
 
+
 @sio.on("new_comment")
 def new_comment_handler(data):
     _on_new_comment(data)
+
 
 @sio.on("connect")
 def on_connect():
     _safe_set(menu_status_var, "接続済み")
     _safe_set(menu_current_session_var, f"現在のセッション: {CURRENT_SESSION}")
 
+
 @sio.on("disconnect")
 def on_disconnect():
     _safe_set(menu_status_var, "未接続")
+
 
 def connect_session(session_name: str):
     def _do_connect():
@@ -173,7 +395,9 @@ def connect_session(session_name: str):
                 messagebox.showerror("接続エラー", str(e))
             except Exception:
                 pass
+
     threading.Thread(target=_do_connect, daemon=True).start()
+
 
 def set_always_on_top(hwnd):
     win32gui.SetWindowPos(
@@ -185,6 +409,7 @@ def set_always_on_top(hwnd):
         0,
         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
     )
+
 
 def _open_history_window(root_ref: tk.Tk):
     win = tk.Toplevel(root_ref)
@@ -233,6 +458,7 @@ def _open_history_window(root_ref: tk.Tk):
         win.after(500, refresh)
 
     refresh()
+
 
 def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     global menu_status_var, menu_session_var, menu_current_session_var
@@ -299,11 +525,20 @@ def create_menu_window(switch_display_callback, root_ref: tk.Tk):
             pass
         root_ref.destroy()
 
-    tk.Button(menu, text="表示モニター切替", command=switch_display_callback).pack(pady=8)
-    tk.Button(menu, text="コメント履歴", command=lambda: _open_history_window(root_ref)).pack(pady=5)
-    tk.Button(menu, text="CSV で保存", command=lambda: export_dialog("csv")).pack(pady=5)
-    tk.Button(menu, text="Excel で保存", command=lambda: export_dialog("xlsx")).pack(pady=5)
+    tk.Button(menu, text="表示モニター切替", command=switch_display_callback).pack(
+        pady=8
+    )
+    tk.Button(
+        menu, text="コメント履歴", command=lambda: _open_history_window(root_ref)
+    ).pack(pady=5)
+    tk.Button(menu, text="CSV で保存", command=lambda: export_dialog("csv")).pack(
+        pady=5
+    )
+    tk.Button(menu, text="Excel で保存", command=lambda: export_dialog("xlsx")).pack(
+        pady=5
+    )
     tk.Button(menu, text="アプリ終了", command=confirm_exit).pack(pady=12)
+
 
 def main():
     global root
@@ -317,19 +552,25 @@ def main():
     def update_monitor_position():
         scr = monitors[current_monitor[0]]
         w, h = scr.width // 4, scr.height
-        root.geometry(f"{w}x{h}+{scr.x + scr.width - w}+{scr.y}")
+        geometry = f"{w}x{h}+{scr.x + scr.width - w}+{scr.y}"
+        root.geometry(geometry)
         root.resizable(False, True)
+        _update_overlay_geometry(geometry, w, h)
 
     update_monitor_position()
     root.configure(bg="#fefefe")
     root.attributes("-topmost", True)
     root.update()
     set_always_on_top(root.winfo_id())
+    _ensure_overlay_window(root)
+    _update_overlay_geometry(root.winfo_geometry(), root.winfo_width(), root.winfo_height())
 
     wrapper = tk.Frame(root, bg="#fefefe")
     wrapper.pack(expand=True, fill="both")
 
-    html_frame = HtmlFrame(wrapper, horizontal_scrollbar=False, vertical_scrollbar=False)
+    html_frame = HtmlFrame(
+        wrapper, horizontal_scrollbar=False, vertical_scrollbar=False
+    )
     html_frame.pack(expand=True, fill="both")
 
     for child in html_frame.winfo_children():
@@ -338,21 +579,90 @@ def main():
 
     with open(BUBBLE_HTML_PATH, encoding="utf-8") as fp:
         bubble_html = fp.read()
-    try:
-        with open(STAMP_HTML_PATH, encoding="utf-8") as fp:
-            stamp_html_src = fp.read()
-    except FileNotFoundError:
-        stamp_html_src = ""
 
     last_html = [""]
 
     style_block = """
 <style>
-html, body { overflow-y: auto; overflow-x: hidden; -ms-overflow-style: none; scrollbar-width: none; }
-body::-webkit-scrollbar { width: 0; height: 0; }
-*::-webkit-scrollbar { width: 0; height: 0; }
-.stamp-area { margin-top: 8px; }
-.stamp-image { width: 33%; height: auto; display: block; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: "Noto Sans JP", sans-serif;
+  background-color: #6dd3f7;
+}
+#app-root {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #6dd3f7;
+}
+#comment-column {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  padding: 28px 20px 40px 20px;
+  box-sizing: border-box;
+}
+#comment-column::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+.comment-wrapper {
+  position: relative;
+  max-width: 92%;
+  margin: 0 auto 24px auto;
+}
+.comment-wrapper:last-child {
+  margin-bottom: 0;
+}
+.shadow-box {
+  background-color: #2c3d52;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 0;
+  border: 2px solid #0b1f33;
+}
+.comment-box {
+  background-color: #ffffff;
+  border: 2px solid #0b1f33;
+  padding: 20px;
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 8px 16px rgba(11, 31, 51, 0.18);
+}
+.name-label {
+  position: absolute;
+  top: -18px;
+  left: -8px;
+  background-color: #ffffff;
+  border: 2px solid #0b1f33;
+  padding: 6px 20px;
+  font-weight: bold;
+  box-shadow: 2px 2px 0px rgba(11, 31, 51, 0.7);
+}
+.comment-name-time {
+  text-align: right;
+  font-weight: bold;
+  color: #555555;
+  margin-bottom: 8px;
+}
+.comment-text {
+  font-size: 20px;
+  line-height: 1.6;
+  font-weight: 400;
+  color: #222222;
+}
+.like {
+  margin-top: 8px;
+  min-height: 12px;
+}
 </style>
 """.strip()
 
@@ -363,58 +673,47 @@ body::-webkit-scrollbar { width: 0; height: 0; }
     else:
         base_html = style_block + bubble_html
 
+    comment_placeholder = "<!--COMMENT_COLUMN-->"
+
+
     def update_comments():
         try:
             while True:
                 raw = message_queue.get_nowait()
                 e = _annotate_entry(raw)
+                if _is_stamp(e):
+                    _enqueue_stamp_balloon(e)
+                    continue
                 messages.append(e)
         except queue.Empty:
             pass
 
-        now_s = server_now_seconds()
-        items = []
+        comment_items = []
         for m in reversed(messages):
             name = html.escape(m.get("name", ""))
-            tstr = str(m.get("time", ""))
-            time_part = f"<span>　</span><span style='font-weight:normal;color:#666;'>{tstr}</span>"
-            stamp_rel = m.get("stamp_url") or m.get("stamp")
-            if stamp_rel:
-                exp = m.get("_expires_at")
-                if isinstance(exp, (int, float)) and now_s > float(exp):
-                    continue
-                src = stamp_rel
-                if isinstance(src, str) and src.startswith("/"):
-                    src = RELAY_SERVER_URL.rstrip("/") + src
-                src = html.escape(src or "")
-                item = f"""
-                <div class="comment-wrapper">
-                  <div class="shadow-box"></div>
-                  <div class="comment-box">
-                    <div class="name-label">{name}</div>
-                    <div class="comment-name-time">{time_part}</div>
-                    <div class="stamp-area"><img src="{src}" alt="stamp" class="stamp-image"></div>
-                    <div class="like"></div>
-                  </div>
-                </div>
-                """
-            else:
-                text = html.escape(m.get("text", ""))
-                item = f"""
-                <div class="comment-wrapper">
-                  <div class="shadow-box"></div>
-                  <div class="comment-box">
-                    <div class="name-label">{name}</div>
-                    <div class="comment-name-time">{time_part}</div>
-                    <div class="comment-text">{text}</div>
-                    <div class="like"></div>
-                  </div>
-                </div>
-                """
-            items.append(item)
+            tstr = html.escape(str(m.get("time", "")))
+            time_part = f"<span style='font-weight:normal;color:#666;'>{tstr}</span>"
+            text_html = html.escape(m.get("text", ""))
+            item = f"""
+            <div class="comment-wrapper">
+              <div class="shadow-box"></div>
+              <div class="comment-box">
+                <div class="name-label">{name}</div>
+                <div class="comment-name-time">{time_part}</div>
+                <div class="comment-text">{text_html}</div>
+                <div class="like"></div>
+              </div>
+            </div>
+            """
+            comment_items.append(item)
 
-        body = "\n".join(items)
-        full_html = base_html.replace("</body>", f"{body}</body>")
+        comment_html = "\n".join(comment_items)
+
+        full_html = base_html
+        if comment_placeholder in full_html:
+            full_html = full_html.replace(comment_placeholder, comment_html, 1)
+        else:
+            full_html = full_html.replace("</body>", f"{comment_html}</body>")
         if full_html != last_html[0]:
             try:
                 html_frame.load_html(full_html)
@@ -431,15 +730,26 @@ body::-webkit-scrollbar { width: 0; height: 0; }
     update_comments()
 
     def on_close():
+        global overlay_window, overlay_canvas, _overlay_animating
         try:
             if sio.connected:
                 sio.disconnect()
         except Exception:
             pass
+        _overlay_animating = False
+        overlay_balloons.clear()
+        if overlay_window is not None:
+            try:
+                overlay_window.destroy()
+            except Exception:
+                pass
+            overlay_window = None
+            overlay_canvas = None
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
