@@ -11,7 +11,15 @@ from overlay import should_drop_on_arrival
 
 def _on_history(data):
     if isinstance(data, list):
-        filtered = [m for m in data if not should_drop_on_arrival(m)]
+        filtered: list[dict] = []
+        queued_entries: list[dict] = []
+        for m in data:
+            if should_drop_on_arrival(m):
+                continue
+            filtered.append(m)
+            entry = dict(m)
+            entry["_from_history"] = True
+            queued_entries.append(entry)
         state.message_log.clear()
         state.message_log.extend(filtered)
         while True:
@@ -19,7 +27,7 @@ def _on_history(data):
                 state.message_queue.get_nowait()
             except queue.Empty:
                 break
-        for entry in filtered:
+        for entry in queued_entries:
             state.message_queue.put(entry)
 
 

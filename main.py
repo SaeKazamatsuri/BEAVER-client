@@ -149,7 +149,7 @@ html, body {
   position: relative;
   background-color: #fff;
   border-radius: 32px;
-  padding: 32px;
+  padding: 32px 32px 22px 32px;
   z-index: 1;
   border: 3px solid #0b1f33;
   box-shadow: 0 16px 32px rgba(11, 31, 51, 0.25);
@@ -187,6 +187,9 @@ html, body {
   line-height: 1.5;
   color: #0b1f33;
   font-weight: 500;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 .like {
   margin-top: 16px;
@@ -210,6 +213,8 @@ html, body {
                 raw = state.message_queue.get_nowait()
                 entry = annotate_entry(raw)
                 if is_stamp(entry):
+                    if entry.get("_from_history"):
+                        continue
                     enqueue_stamp_balloon(entry)
                     continue
                 state.messages.append(entry)
