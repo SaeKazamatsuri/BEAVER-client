@@ -211,6 +211,21 @@ def ensure_overlay_window(root_ref: tk.Tk) -> None:
     state.overlay_animating = True
     state.overlay_last_tick[0] = time.monotonic()
     canvas.after(16, _overlay_tick)
+    _raise_overlay_window()
+
+
+def _raise_overlay_window() -> None:
+    overlay = state.overlay_window
+    if overlay is None:
+        return
+    try:
+        overlay.lift()
+    except Exception:
+        pass
+    try:
+        overlay.attributes("-topmost", True)
+    except tk.TclError:
+        pass
 
 
 def update_overlay_geometry(geometry: str, width: int, height: int) -> None:
@@ -218,6 +233,7 @@ def update_overlay_geometry(geometry: str, width: int, height: int) -> None:
         return
     state.overlay_window.geometry(geometry)
     state.overlay_canvas.config(width=width, height=height)
+    _raise_overlay_window()
 
 
 def _overlay_tick() -> None:
