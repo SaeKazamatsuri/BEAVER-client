@@ -30,8 +30,8 @@ RELAY_SERVER_URL = os.environ.get("RELAY_SERVER_URL", "https://beaver.works")
 RELAY_SOCKETIO_PATH = os.environ.get("RELAY_SOCKETIO_PATH", "/socket.io")
 
 STAMP_BALLOON_LIFETIME_SEC = 8.0
-STAMP_BALLOON_MIN_SPEED_PX = 70.0
-STAMP_BALLOON_MAX_SPEED_PX = 110.0
+STAMP_BALLOON_MIN_SPEED_PX = 90.0
+STAMP_BALLOON_MAX_SPEED_PX = 200.0
 STAMP_BALLOON_MAX_ACTIVE = 8
 STAMP_BALLOON_MAX_WIDTH = 220
 STAMP_BALLOON_START_PADDING = 40
@@ -548,6 +548,33 @@ def main():
 
     monitors = get_monitors()
     current_monitor = [0]
+    overlay_geometry_state = {"geometry": None, "width": 0, "height": 0}
+
+    def sync_overlay_position(event=None):
+        if root is None:
+            return
+        geometry = root.winfo_geometry()
+        if not geometry:
+            return
+        if event is not None:
+            width = event.width
+            height = event.height
+        else:
+            width = root.winfo_width()
+            height = root.winfo_height()
+        if width <= 0 or height <= 0:
+            return
+        state = overlay_geometry_state
+        if (
+            state["geometry"] == geometry
+            and state["width"] == width
+            and state["height"] == height
+        ):
+            return
+        state["geometry"] = geometry
+        state["width"] = width
+        state["height"] = height
+        _update_overlay_geometry(geometry, width, height)
 
     def update_monitor_position():
         scr = monitors[current_monitor[0]]
@@ -564,6 +591,8 @@ def main():
     set_always_on_top(root.winfo_id())
     _ensure_overlay_window(root)
     _update_overlay_geometry(root.winfo_geometry(), root.winfo_width(), root.winfo_height())
+    root.bind("<Configure>", sync_overlay_position, add="+")
+    sync_overlay_position()
 
     wrapper = tk.Frame(root, bg="#fefefe")
     wrapper.pack(expand=True, fill="both")
