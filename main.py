@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import queue
+import re
 
 import tkinter as tk
 from screeninfo import get_monitors
@@ -19,6 +20,24 @@ from overlay import (
     update_overlay_geometry,
 )
 from ui import create_menu_window, set_always_on_top
+
+
+def escape_with_wbr(text: str, chunk: int = 16) -> str:
+    if text is None:
+        text = ""
+    else:
+        text = str(text)
+
+    escaped = html.escape(text)
+
+    pattern = re.compile(r"[0-9A-Za-z_./:-]{32,}")
+
+    def insert_wbr(match: re.Match) -> str:
+        word = match.group(0)
+        parts = [word[i : i + chunk] for i in range(0, len(word), chunk)]
+        return "<wbr>".join(parts)
+
+    return pattern.sub(insert_wbr, escaped)
 
 
 def main():
@@ -67,7 +86,9 @@ def main():
     root.update()
     set_always_on_top(root.winfo_id())
     ensure_overlay_window(root)
-    update_overlay_geometry(root.winfo_geometry(), root.winfo_width(), root.winfo_height())
+    update_overlay_geometry(
+        root.winfo_geometry(), root.winfo_width(), root.winfo_height()
+    )
     root.bind("<Configure>", sync_overlay_position, add="+")
     sync_overlay_position()
 
@@ -120,7 +141,7 @@ html, body {
 .comment-wrapper {
   position: relative;
   max-width: 92%;
-  margin: 0 auto 24px auto;
+  margin: 0 auto 16px auto;
 }
 .comment-wrapper:last-child {
   margin-bottom: 0;
@@ -149,7 +170,7 @@ html, body {
   position: relative;
   background-color: #fff;
   border-radius: 32px;
-  padding: 32px 32px 22px 32px;
+  padding: 20px 28px 10px 28px;
   z-index: 1;
   border: 3px solid #0b1f33;
   box-shadow: 0 16px 32px rgba(11, 31, 51, 0.25);
@@ -183,17 +204,15 @@ html, body {
   text-align: right;
 }
 .comment-text {
-  font-size: 24px;
-  line-height: 1.5;
+  font-size: 28px;
+  line-height: 1.45;
   color: #0b1f33;
   font-weight: 500;
-  overflow-wrap: anywhere;
-  word-break: break-word;
   white-space: pre-wrap;
 }
 .like {
-  margin-top: 16px;
-  min-height: 16px;
+  margin-top: 4px;
+  min-height: 0;
 }
 </style>
 """.strip()
@@ -226,7 +245,7 @@ html, body {
             name = html.escape(msg.get("name", ""))
             tstr = html.escape(str(msg.get("time", "")))
             time_part = f"<span style='font-weight:normal;color:#666;'>{tstr}</span>"
-            text_html = html.escape(msg.get("text", ""))
+            text_html = escape_with_wbr(msg.get("text", ""))
             item = f"""
             <div class="comment-wrapper">
               <div class="shadow-box"></div>
