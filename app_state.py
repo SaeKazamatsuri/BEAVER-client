@@ -4,10 +4,16 @@ import queue
 import threading
 import time
 from collections import deque
+from typing import Callable
 
 import socketio
 import tkinter as tk
 
+from constants import (
+    STAMP_BALLOON_LIFETIME_SEC,
+    STAMP_BALLOON_MAX_SPEED_PX,
+    STAMP_BALLOON_MIN_SPEED_PX,
+)
 
 message_queue: queue.Queue = queue.Queue()
 message_log: list[dict] = []
@@ -30,6 +36,36 @@ root: tk.Tk | None = None
 menu_status_var: tk.StringVar | None = None
 menu_session_var: tk.StringVar | None = None
 menu_current_session_var: tk.StringVar | None = None
+experiment_window: tk.Toplevel | None = None
+request_layout_refresh: Callable[[], None] | None = None
+
+# --- Experiment (stamp) settings ---
+# These values are intentionally mutable so experiments can tweak them at runtime.
+STAMP_AREA_MODES = ("comment", "left75")
+STAMP_ORIGIN_CORNERS = ("bottom_right", "top_right", "bottom_left", "top_left")
+
+stamp_area_mode: str = "comment"
+stamp_origin_corner: str = "bottom_right"
+stamp_speed_min_px_s: float = STAMP_BALLOON_MIN_SPEED_PX
+stamp_speed_max_px_s: float = STAMP_BALLOON_MAX_SPEED_PX
+stamp_distance_limit_px: float = 0.0  # 0 = unlimited
+stamp_lifetime_sec: float = STAMP_BALLOON_LIFETIME_SEC
+
+
+def reset_stamp_experiment_settings() -> None:
+    global stamp_area_mode
+    global stamp_origin_corner
+    global stamp_speed_min_px_s
+    global stamp_speed_max_px_s
+    global stamp_distance_limit_px
+    global stamp_lifetime_sec
+
+    stamp_area_mode = "comment"
+    stamp_origin_corner = "bottom_right"
+    stamp_speed_min_px_s = STAMP_BALLOON_MIN_SPEED_PX
+    stamp_speed_max_px_s = STAMP_BALLOON_MAX_SPEED_PX
+    stamp_distance_limit_px = 0.0
+    stamp_lifetime_sec = STAMP_BALLOON_LIFETIME_SEC
 
 _server_offset_lock = threading.Lock()
 _server_offset: float | None = None

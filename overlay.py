@@ -157,21 +157,66 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
         root.after(120, lambda: _spawn_balloon_from_bytes(stamp_id, data))
         return
 
+    corner = getattr(state, "stamp_origin_corner", "bottom_right")
+    valid_corners = getattr(
+        state,
+        "STAMP_ORIGIN_CORNERS",
+        ("bottom_right", "top_right", "bottom_left", "top_left"),
+    )
+    if corner not in valid_corners:
+        corner = "bottom_right"
+    is_left = "left" in corner
+    is_top = corner.startswith("top")
+
+    speed_min = getattr(state, "stamp_speed_min_px_s", STAMP_BALLOON_MIN_SPEED_PX)
+    speed_max = getattr(state, "stamp_speed_max_px_s", STAMP_BALLOON_MAX_SPEED_PX)
+    try:
+        speed_min = float(speed_min)
+        speed_max = float(speed_max)
+    except Exception:
+        speed_min = STAMP_BALLOON_MIN_SPEED_PX
+        speed_max = STAMP_BALLOON_MAX_SPEED_PX
+    speed_min = max(1.0, abs(speed_min))
+    speed_max = max(1.0, abs(speed_max))
+    speed = random.uniform(speed_min, speed_max)
+
     half_w = photo.width() / 2
     min_x = STAMP_BALLOON_START_PADDING + half_w
     max_x = max(min_x + 1, canvas_w - min_x)
-    spawn_x = random.uniform(min_x, max_x)
-    spawn_y = canvas_h + photo.height() / 2 + 12
+    span = max(1.0, (max_x - min_x) * 0.35)
+    if is_left:
+        x0, x1 = min_x, min(max_x, min_x + span)
+    else:
+        x0, x1 = max(min_x, max_x - span), max_x
+    spawn_x = random.uniform(x0, x1)
+
+    y_off = photo.height() / 2 + 12
+    spawn_y = -y_off if is_top else canvas_h + y_off
 
     canvas_id = canvas.create_image(spawn_x, spawn_y, image=photo, anchor="center")
+    life = getattr(state, "stamp_lifetime_sec", STAMP_BALLOON_LIFETIME_SEC)
+    try:
+        life = float(life)
+    except Exception:
+        life = STAMP_BALLOON_LIFETIME_SEC
+    life = max(0.1, life)
+
+    horizontal_sign = 1.0 if is_left else -1.0
+    vertical_sign = 1.0 if is_top else -1.0
+    vx = random.uniform(-0.15 * speed, 0.15 * speed) + (
+        horizontal_sign * random.uniform(0.05 * speed, 0.25 * speed)
+    )
+    vy = vertical_sign * speed
     balloon = {
         "stamp_id": stamp_id,
         "canvas_id": canvas_id,
         "photo": photo,
-        "vx": random.uniform(-20.0, 20.0),
-        "vy": -random.uniform(STAMP_BALLOON_MIN_SPEED_PX, STAMP_BALLOON_MAX_SPEED_PX),
+        "vx": vx,
+        "vy": vy,
+        "start_x": spawn_x,
+        "start_y": spawn_y,
         "start": time.monotonic(),
-        "life": STAMP_BALLOON_LIFETIME_SEC,
+        "life": life,
         "phase": random.uniform(0.0, math.tau),
         "wobble": random.uniform(5.0, STAMP_BALLOON_WOBBLE_AMPLITUDE),
         "freq": random.uniform(
@@ -246,6 +291,8 @@ def _overlay_tick() -> None:
 
     to_remove: list[dict] = []
     canvas = state.overlay_canvas
+    canvas_w = canvas.winfo_width()
+    canvas_h = canvas.winfo_height()
     for balloon in list(state.overlay_balloons):
         balloon["phase"] += dt
         wobble = math.sin(balloon["phase"] * balloon["freq"]) * balloon["wobble"]
@@ -254,10 +301,26 @@ def _overlay_tick() -> None:
         canvas.move(balloon["canvas_id"], dx, dy)
         coords = canvas.coords(balloon["canvas_id"])
         elapsed = now - balloon["start"]
+        distance_limit = getattr(state, "stamp_distance_limit_px", 0.0)
+        try:
+            distance_limit = float(distance_limit)
+        except Exception:
+            distance_limit = 0.0
         if (
             not coords
             or elapsed >= balloon["life"]
+            or (
+                distance_limit > 0
+                and math.hypot(
+                    coords[0] - balloon.get("start_x", coords[0]),
+                    coords[1] - balloon.get("start_y", coords[1]),
+                )
+                >= distance_limit
+            )
+            or coords[0] < -balloon["photo"].width()
+            or coords[0] > canvas_w + balloon["photo"].width()
             or coords[1] < -balloon["photo"].height()
+            or coords[1] > canvas_h + balloon["photo"].height()
         ):
             to_remove.append(balloon)
 

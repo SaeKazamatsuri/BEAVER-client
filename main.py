@@ -50,15 +50,8 @@ def main():
     current_monitor = [0]
     overlay_geometry_state = {"geometry": None, "width": 0, "height": 0}
 
-    def sync_overlay_position(event=None):
-        if root is None:
-            return
-        geometry = root.winfo_geometry()
-        if not geometry:
-            return
-        width = event.width if event is not None else root.winfo_width()
-        height = event.height if event is not None else root.winfo_height()
-        if width <= 0 or height <= 0:
+    def _apply_overlay_geometry(geometry: str, width: int, height: int) -> None:
+        if not geometry or width <= 0 or height <= 0:
             return
         state_cache = overlay_geometry_state
         if (
@@ -72,13 +65,54 @@ def main():
         state_cache["height"] = height
         update_overlay_geometry(geometry, width, height)
 
-    def update_monitor_position():
+    def _comment_rect(scr) -> tuple[int, int, int, int]:
+        comment_w = max(1, scr.width // 4)
+        comment_h = max(1, scr.height)
+        comment_x = scr.x + scr.width - comment_w
+        comment_y = scr.y
+        return comment_w, comment_h, comment_x, comment_y
+
+    def _overlay_rect(scr) -> tuple[int, int, int, int]:
+        comment_w, _, _, _ = _comment_rect(scr)
+        mode = getattr(state, "stamp_area_mode", "comment")
+        if mode == "left75":
+            overlay_w = max(1, scr.width - comment_w)
+            overlay_h = max(1, scr.height)
+            overlay_x = scr.x
+            overlay_y = scr.y
+            return overlay_w, overlay_h, overlay_x, overlay_y
+        overlay_w = max(1, comment_w)
+        overlay_h = max(1, scr.height)
+        overlay_x = scr.x + scr.width - overlay_w
+        overlay_y = scr.y
+        return overlay_w, overlay_h, overlay_x, overlay_y
+
+    def _apply_layout(update_root: bool) -> None:
+        if not monitors:
+            return
         scr = monitors[current_monitor[0]]
-        w, h = scr.width // 4, scr.height
-        geometry = f"{w}x{h}+{scr.x + scr.width - w}+{scr.y}"
-        root.geometry(geometry)
-        root.resizable(False, True)
-        update_overlay_geometry(geometry, w, h)
+        comment_w, comment_h, comment_x, comment_y = _comment_rect(scr)
+        comment_geometry = f"{comment_w}x{comment_h}+{comment_x}+{comment_y}"
+        if update_root:
+            root.geometry(comment_geometry)
+            root.resizable(False, True)
+
+        overlay_w, overlay_h, overlay_x, overlay_y = _overlay_rect(scr)
+        overlay_geometry = f"{overlay_w}x{overlay_h}+{overlay_x}+{overlay_y}"
+        _apply_overlay_geometry(overlay_geometry, overlay_w, overlay_h)
+
+    def sync_overlay_position(event=None):
+        if root is None:
+            return
+        if getattr(state, "stamp_area_mode", "comment") != "comment":
+            return
+        geometry = root.winfo_geometry()
+        width = event.width if event is not None else root.winfo_width()
+        height = event.height if event is not None else root.winfo_height()
+        _apply_overlay_geometry(geometry, width, height)
+
+    def update_monitor_position():
+        _apply_layout(update_root=True)
 
     update_monitor_position()
     root.configure(bg="#fefefe")
@@ -86,11 +120,19 @@ def main():
     root.update()
     set_always_on_top(root.winfo_id())
     ensure_overlay_window(root)
-    update_overlay_geometry(
-        root.winfo_geometry(), root.winfo_width(), root.winfo_height()
-    )
+    _apply_layout(update_root=False)
     root.bind("<Configure>", sync_overlay_position, add="+")
     sync_overlay_position()
+
+    def request_layout_refresh() -> None:
+        if state.root is None:
+            return
+        try:
+            state.root.after(0, lambda: _apply_layout(update_root=False))
+        except Exception:
+            pass
+
+    state.request_layout_refresh = request_layout_refresh
 
     wrapper = tk.Frame(root, bg="#fefefe")
     wrapper.pack(expand=True, fill="both")
