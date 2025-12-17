@@ -117,6 +117,7 @@ def _open_experiment_window(root_ref: tk.Tk):
 
     def set_area_mode():
         state.stamp_area_mode = area_var.get()
+        refresh_corner_controls()
         cb = getattr(state, "request_layout_refresh", None)
         if cb is not None:
             try:
@@ -140,45 +141,43 @@ def _open_experiment_window(root_ref: tk.Tk):
     ).pack(anchor="w", padx=8, pady=2)
 
     # --- Origin corner ---
-    corner_frame = ttk.LabelFrame(container, text="出現位置")
+    corner_frame = ttk.LabelFrame(container, text="出現位置（左75%のとき有効）")
     corner_frame.pack(fill="x", pady=(0, 10))
-    corner_var = tk.StringVar(
-        value=getattr(state, "stamp_origin_corner", "bottom_right")
-    )
+    initial_corner = getattr(state, "stamp_origin_corner", "bottom_right")
+    if initial_corner not in ("bottom_left", "bottom_right"):
+        initial_corner = "bottom_right" if "right" in str(initial_corner) else "bottom_left"
+    state.stamp_origin_corner = initial_corner
+    corner_var = tk.StringVar(value=initial_corner)
 
     def set_corner():
         state.stamp_origin_corner = corner_var.get()
 
     corner_grid = ttk.Frame(corner_frame)
     corner_grid.pack(anchor="w", padx=8, pady=6)
-    ttk.Radiobutton(
-        corner_grid,
-        text="左上",
-        value="top_left",
-        variable=corner_var,
-        command=set_corner,
-    ).grid(row=0, column=0, sticky="w", padx=(0, 16), pady=2)
-    ttk.Radiobutton(
-        corner_grid,
-        text="右上",
-        value="top_right",
-        variable=corner_var,
-        command=set_corner,
-    ).grid(row=0, column=1, sticky="w", pady=2)
-    ttk.Radiobutton(
+    rb_corner_left = ttk.Radiobutton(
         corner_grid,
         text="左下",
         value="bottom_left",
         variable=corner_var,
         command=set_corner,
-    ).grid(row=1, column=0, sticky="w", padx=(0, 16), pady=2)
-    ttk.Radiobutton(
+    )
+    rb_corner_left.grid(row=0, column=0, sticky="w", padx=(0, 16), pady=2)
+    rb_corner_right = ttk.Radiobutton(
         corner_grid,
         text="右下",
         value="bottom_right",
         variable=corner_var,
         command=set_corner,
-    ).grid(row=1, column=1, sticky="w", pady=2)
+    )
+    rb_corner_right.grid(row=0, column=1, sticky="w", pady=2)
+
+    def refresh_corner_controls() -> None:
+        enabled = area_var.get() == "left75"
+        state_str = "normal" if enabled else "disabled"
+        rb_corner_left.configure(state=state_str)
+        rb_corner_right.configure(state=state_str)
+
+    refresh_corner_controls()
 
     # --- Speed range ---
     speed_frame = ttk.LabelFrame(container, text="移動速度（px/秒）")
@@ -230,31 +229,35 @@ def _open_experiment_window(root_ref: tk.Tk):
     ).pack(fill="x", padx=8, pady=(0, 6))
 
     # --- Distance limit ---
-    distance_frame = ttk.LabelFrame(container, text="移動距離の上限（px）")
+    distance_frame = ttk.LabelFrame(container, text="移動距離の上限（%）")
     distance_frame.pack(fill="x", pady=(0, 10))
-    distance_var = tk.DoubleVar(value=getattr(state, "stamp_distance_limit_px", 0.0))
+    distance_var = tk.DoubleVar(
+        value=getattr(state, "stamp_distance_limit_percent", 0.0)
+    )
 
     def set_distance(value: str):
         try:
             v = float(value)
         except Exception:
             return
-        state.stamp_distance_limit_px = max(0.0, v)
+        state.stamp_distance_limit_percent = max(0.0, min(100.0, v))
 
-    ttk.Label(distance_frame, text="0 = 無制限").pack(anchor="w", padx=8)
+    ttk.Label(distance_frame, text="0 = 無制限 / 100 = 画面の高さ分").pack(
+        anchor="w", padx=8
+    )
     tk.Scale(
         distance_frame,
         from_=0,
-        to=6000,
+        to=100,
         orient="horizontal",
-        resolution=10,
+        resolution=1,
         showvalue=True,
         variable=distance_var,
         command=set_distance,
     ).pack(fill="x", padx=8, pady=(0, 6))
 
     # --- Lifetime ---
-    lifetime_frame = ttk.LabelFrame(container, text="表示時間（秒）")
+    lifetime_frame = ttk.LabelFrame(container, text="強制非表示（秒）")
     lifetime_frame.pack(fill="x", pady=(0, 10))
     lifetime_var = tk.DoubleVar(value=getattr(state, "stamp_lifetime_sec", 8.0))
 
@@ -286,7 +289,7 @@ def _open_experiment_window(root_ref: tk.Tk):
         corner_var.set(state.stamp_origin_corner)
         speed_min_var.set(state.stamp_speed_min_px_s)
         speed_max_var.set(state.stamp_speed_max_px_s)
-        distance_var.set(state.stamp_distance_limit_px)
+        distance_var.set(state.stamp_distance_limit_percent)
         lifetime_var.set(state.stamp_lifetime_sec)
         set_area_mode()
 
