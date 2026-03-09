@@ -1,4 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
+from datetime import datetime
+date_str = datetime.now().strftime('%y%m%d')
 
 
 a = Analysis(
@@ -22,7 +24,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='beaver',
+    name=f'beaver_{date_str}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
