@@ -1,11 +1,37 @@
 import os
 import sys
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.abspath("."))
 BUBBLE_HTML_PATH = os.path.join(BASE_DIR, "bubble.html")
 
-RELAY_SERVER_URL = os.environ.get("RELAY_SERVER_URL", "https://beaver.works")
-RELAY_SOCKETIO_PATH = os.environ.get("RELAY_SOCKETIO_PATH", "/socket.io")
+
+def _trim_trailing_slash(value: str) -> str:
+    return value.rstrip("/")
+
+
+def _derive_ws_base_url(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    path = parsed.path.rstrip("/")
+    ws_path = "/ws" if not path else f"{path}/ws"
+    return urlunsplit((scheme, parsed.netloc, ws_path, "", ""))
+
+
+BACKEND_BASE_URL = _trim_trailing_slash(
+    os.environ.get("BACKEND_BASE_URL")
+    or os.environ.get("RELAY_SERVER_URL")
+    or "https://api.beaver.works"
+)
+BACKEND_WS_BASE_URL = _trim_trailing_slash(
+    os.environ.get("BACKEND_WS_BASE_URL") or _derive_ws_base_url(BACKEND_BASE_URL)
+)
+BACKEND_WS_ORIGIN = os.environ.get("BACKEND_WS_ORIGIN", "https://beaver.works")
+BACKEND_HTTP_TIMEOUT_SEC = 10
+
+TRANSCRIPTION_WORK_DIR = Path(BASE_DIR) / "transcription"
+TRANSCRIPTION_EXECUTABLE_PATH = TRANSCRIPTION_WORK_DIR / "vosk.exe"
 
 STAMP_BALLOON_LIFETIME_SEC = 8.0
 STAMP_BALLOON_MIN_SPEED_PX = 90.0

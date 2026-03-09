@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from datetime import datetime
+
 date_str = datetime.now().strftime('%y%m%d')
 
 
@@ -7,8 +8,15 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('bubble.html', '.')],
-    hiddenimports=['engineio.async_drivers.threading', 'socketio.async_drivers.threading', 'flask_socketio', 'tkinterweb', 'screeninfo', 'playsound'],
+    datas=[
+        ('bubble.html', '.'),
+        ('transcription\\vosk.exe', 'transcription'),
+        ('transcription\\libvosk.dll', 'transcription'),
+        ('transcription\\libgcc_s_seh-1.dll', 'transcription'),
+        ('transcription\\libstdc++-6.dll', 'transcription'),
+        ('transcription\\libwinpthread-1.dll', 'transcription'),
+    ],
+    hiddenimports=['tkinterweb', 'screeninfo'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

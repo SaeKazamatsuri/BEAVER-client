@@ -11,7 +11,8 @@ import win32gui
 from tkinter import filedialog, messagebox
 
 import app_state as state
-from events import connect_session
+from events import connect_session, disconnect_session
+from transcription_service import stop_transcription_service
 
 
 def set_always_on_top(hwnd):
@@ -357,11 +358,8 @@ def create_menu_window(switch_display_callback, root_ref: tk.Tk):
 
     def confirm_exit():
         if messagebox.askokcancel("終了", "アプリを終了しますか？"):
-            try:
-                if state.sio.connected:
-                    state.sio.disconnect()
-            except Exception:
-                pass
+            disconnect_session(show_status=False)
+            stop_transcription_service()
             root_ref.destroy()
 
     tk.Button(menu, text="ディスプレイ切替", command=switch_display_callback).pack(

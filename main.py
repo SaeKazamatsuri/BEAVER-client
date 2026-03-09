@@ -9,8 +9,8 @@ from screeninfo import get_monitors
 from tkinterweb import HtmlFrame
 
 import app_state as state
-import events  # noqa: F401
 from constants import BUBBLE_HTML_PATH
+from events import disconnect_session
 from overlay import (
     annotate_entry,
     ensure_overlay_window,
@@ -19,6 +19,7 @@ from overlay import (
     stop_overlay,
     update_overlay_geometry,
 )
+from transcription_service import start_transcription_service, stop_transcription_service
 from ui import create_menu_window, set_always_on_top
 
 
@@ -133,6 +134,9 @@ def main():
             pass
 
     state.request_layout_refresh = request_layout_refresh
+    start_transcription_service(
+        lambda: state.CURRENT_SESSION if state.session_ready else None
+    )
 
     wrapper = tk.Frame(root, bg="#fefefe")
     wrapper.pack(expand=True, fill="both")
@@ -325,11 +329,8 @@ html, body {
     update_comments()
 
     def on_close():
-        try:
-            if state.sio.connected:
-                state.sio.disconnect()
-        except Exception:
-            pass
+        disconnect_session(show_status=False)
+        stop_transcription_service()
         stop_overlay()
         root.destroy()
 

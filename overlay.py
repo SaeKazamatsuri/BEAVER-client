@@ -14,8 +14,8 @@ import tkinter as tk
 
 import app_state as state
 from constants import (
+    BACKEND_BASE_URL,
     OVERLAY_TRANSPARENT_COLOR,
-    RELAY_SERVER_URL,
     STAMP_BALLOON_LIFETIME_SEC,
     STAMP_BALLOON_MAX_ACTIVE,
     STAMP_BALLOON_MAX_SPEED_PX,
@@ -83,7 +83,7 @@ def _normalize_stamp_src(entry: dict) -> Tuple[str, str] | None:
         return None
     src = stamp_rel
     if isinstance(src, str) and src.startswith("/"):
-        src = RELAY_SERVER_URL.rstrip("/") + src
+        src = BACKEND_BASE_URL.rstrip("/") + src
     stamp_id = str(
         entry.get("id") or entry.get("_id") or entry.get("stamp_id") or uuid.uuid4().hex
     )

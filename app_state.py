@@ -6,7 +6,6 @@ import time
 from collections import deque
 from typing import Callable
 
-import socketio
 import tkinter as tk
 
 from constants import (
@@ -27,11 +26,8 @@ overlay_last_tick = [time.monotonic()]
 recent_stamp_ids: deque[str] = deque()
 recent_stamp_ids_set: set[str] = set()
 
-sio = socketio.Client(
-    reconnection=True, reconnection_attempts=0, logger=False, engineio_logger=False
-)
-
 CURRENT_SESSION = "default"
+session_ready = False
 root: tk.Tk | None = None
 menu_status_var: tk.StringVar | None = None
 menu_session_var: tk.StringVar | None = None
