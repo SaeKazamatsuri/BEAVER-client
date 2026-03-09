@@ -8,7 +8,13 @@ from urllib.parse import urlsplit
 from tkinter import messagebox
 
 import app_state as state
-from backend_api import BackendApiError, build_ws_url, fetch_bootstrap, parse_comment_event
+from backend_api import (
+    BackendApiError,
+    build_ws_url,
+    fetch_bootstrap,
+    fetch_transcriptions,
+    parse_comment_event,
+)
 from constants import BACKEND_HTTP_TIMEOUT_SEC, BACKEND_WS_ORIGIN
 from overlay import should_drop_on_arrival
 from wsproto import WSConnection
@@ -119,6 +125,7 @@ def disconnect_session(show_status: bool = True) -> None:
             pass
 
     state.session_ready = False
+    state.set_transcription_session(None)
     if show_status:
         state.safe_set(state.menu_status_var, "未接続")
 
@@ -273,6 +280,14 @@ def connect_session(session_name: str):
 
             state.CURRENT_SESSION = normalized_session
             state.session_ready = True
+            state.set_transcription_session(normalized_session)
+            try:
+                transcriptions = fetch_transcriptions(normalized_session)
+            except BackendApiError:
+                transcriptions = []
+            except Exception:
+                transcriptions = []
+            state.replace_transcription_items(transcriptions)
             _on_history(messages)
             state.safe_set(
                 state.menu_current_session_var,

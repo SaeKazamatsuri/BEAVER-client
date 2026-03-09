@@ -1,21 +1,56 @@
 from __future__ import annotations
 
-import json
+import csv
 import subprocess
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections import deque
+from collections.abc import Callable
+from datetime import datetime, timezone
 
 from backend_api import post_transcription
-from constants import TRANSCRIPTION_EXECUTABLE_PATH, TRANSCRIPTION_WORK_DIR
+from constants import (
+    TRANSCRIPTION_CSV_PATH,
+    TRANSCRIPTION_EXECUTABLE_PATH,
+    TRANSCRIPTION_WORK_DIR,
+)
+
+StatusCallback = Callable[[dict[str, object], dict[str, object] | None], None]
+ItemCallback = Callable[[dict[str, object]], None]
+
+_MISSING = object()
+
+
+def _now_iso() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 class TranscriptionService:
-    def __init__(self, session_provider: Callable[[], str | None]) -> None:
+    def __init__(
+        self,
+        session_provider: Callable[[], str | None],
+        status_callback: StatusCallback | None,
+        item_callback: ItemCallback | None,
+    ) -> None:
         self._session_provider = session_provider
+        self._status_callback = status_callback
+        self._item_callback = item_callback
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
+        self._status_snapshot: dict[str, object] = {
+            "state": "idle",
+            "process_alive": False,
+            "session": "",
+            "last_started_at": None,
+            "last_success_at": None,
+            "last_error_at": None,
+            "last_error_message": None,
+        }
 
     def start(self) -> None:
         with self._lock:
@@ -23,7 +58,19 @@ class TranscriptionService:
                 return
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
+        started_at = _now_iso()
+        self._publish_status(
+            state="starting",
+            process_alive=False,
+            session=self._current_session(),
+            last_started_at=started_at,
+            event_name="起動開始",
+            event_detail="文字起こしプロセスを起動しています。",
+            event_time=started_at,
+        )
+        thread = self._thread
+        if thread is not None:
+            thread.start()
 
     def stop(self) -> None:
         with self._lock:
@@ -37,53 +84,279 @@ class TranscriptionService:
         with self._lock:
             self._process = None
             self._thread = None
+        stopped_at = _now_iso()
+        self._publish_status(
+            state="stopped",
+            process_alive=False,
+            session=self._current_session(),
+            event_name="停止",
+            event_detail="文字起こしサービスを停止しました。",
+            event_time=stopped_at,
+        )
 
     def _run(self) -> None:
+        current_session = self._current_session()
         if not TRANSCRIPTION_EXECUTABLE_PATH.is_file():
+            missing_at = _now_iso()
+            self._publish_status(
+                state="error",
+                process_alive=False,
+                session=current_session,
+                last_error_at=missing_at,
+                last_error_message="文字起こし実行ファイルが見つかりません。",
+                event_name="実行ファイル未検出",
+                event_detail=f"{TRANSCRIPTION_EXECUTABLE_PATH.name} が見つかりません。",
+                event_time=missing_at,
+            )
             return
 
         try:
             process = subprocess.Popen(
-                [str(TRANSCRIPTION_EXECUTABLE_PATH)],
+                [
+                    str(TRANSCRIPTION_EXECUTABLE_PATH),
+                    "--output-csv",
+                    str(TRANSCRIPTION_CSV_PATH),
+                    "--quiet",
+                ],
                 cwd=str(TRANSCRIPTION_WORK_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
             )
-        except OSError:
+        except OSError as exc:
+            failed_at = _now_iso()
+            self._publish_status(
+                state="error",
+                process_alive=False,
+                session=current_session,
+                last_error_at=failed_at,
+                last_error_message=str(exc),
+                event_name="起動失敗",
+                event_detail=f"文字起こしプロセスの起動に失敗しました: {exc}",
+                event_time=failed_at,
+            )
             return
 
         with self._lock:
             self._process = process
 
+        started_at = _now_iso()
+        self._publish_status(
+            state="idle",
+            process_alive=True,
+            session=current_session,
+            event_name="起動成功",
+            event_detail="文字起こしプロセスが起動しました。",
+            event_time=started_at,
+        )
+        self._publish_status(
+            state="idle",
+            process_alive=True,
+            session=current_session,
+            event_name="待機中",
+            event_detail="音声入力を待機しています。",
+            event_time=started_at,
+        )
+
+        exit_code: int | None = None
+        csv_sync_thread = threading.Thread(
+            target=self._run_csv_sync,
+            args=(process,),
+            daemon=True,
+        )
+        csv_sync_thread.start()
+
         try:
-            stream = process.stdout
-            if stream is None:
-                return
-            for raw_line in stream:
-                if self._stop_event.is_set():
+            while not self._stop_event.is_set():
+                polled_exit_code = process.poll()
+                if polled_exit_code is not None:
+                    exit_code = polled_exit_code
                     break
-                text = _extract_final_text(raw_line)
-                if text is None:
-                    continue
-                session = self._session_provider()
-                if session is None:
-                    continue
-                try:
-                    post_transcription(session, text)
-                except Exception:
-                    continue
+                self._stop_event.wait(0.5)
+            if exit_code is None and not self._stop_event.is_set():
+                exit_code = process.poll()
+        except Exception as exc:
+            if not self._stop_event.is_set():
+                failed_at = _now_iso()
+                self._publish_status(
+                    state="error",
+                    process_alive=False,
+                    session=self._current_session(),
+                    last_error_at=failed_at,
+                    last_error_message=str(exc),
+                    event_name="プロセス異常終了",
+                    event_detail=f"文字起こしプロセスが異常終了しました: {exc}",
+                    event_time=failed_at,
+                )
         finally:
+            csv_sync_thread.join(timeout=2.0)
             _terminate_process(process)
             with self._lock:
                 if self._process is process:
                     self._process = None
+            if exit_code is not None and not self._stop_event.is_set():
+                finished_at = _now_iso()
+                if exit_code == 0:
+                    self._publish_status(
+                        state="stopped",
+                        process_alive=False,
+                        session=self._current_session(),
+                        last_error_at=None,
+                        last_error_message=None,
+                        event_name="停止",
+                        event_detail="文字起こしプロセスが正常終了しました。",
+                        event_time=finished_at,
+                    )
+                else:
+                    detail = (
+                        f"文字起こしプロセスが終了コード {exit_code} で停止しました。"
+                    )
+                    self._publish_status(
+                        state="error",
+                        process_alive=False,
+                        session=self._current_session(),
+                        last_error_at=finished_at,
+                        last_error_message=detail,
+                        event_name="プロセス異常終了",
+                        event_detail=detail,
+                        event_time=finished_at,
+                    )
+
+    def _run_csv_sync(self, process: subprocess.Popen[str]) -> None:
+        processed_row_count = _read_transcript_row_count()
+        pending_rows: deque[tuple[str, str]] = deque()
+
+        while not self._stop_event.is_set():
+            current_session = self._current_session()
+            new_rows, processed_row_count = _read_new_transcript_rows(
+                processed_row_count,
+                current_session,
+            )
+            pending_rows.extend(new_rows)
+            self._flush_pending_rows(pending_rows)
+
+            if process.poll() is not None:
+                final_session = self._current_session()
+                final_rows, processed_row_count = _read_new_transcript_rows(
+                    processed_row_count,
+                    final_session,
+                )
+                pending_rows.extend(final_rows)
+                self._flush_pending_rows(pending_rows)
+                return
+
+            if self._stop_event.wait(0.5):
+                return
+
+    def _flush_pending_rows(self, pending_rows: deque[tuple[str, str]]) -> None:
+        while pending_rows and not self._stop_event.is_set():
+            session, text = pending_rows[0]
+            try:
+                item = post_transcription(session, text)
+            except Exception as exc:
+                failed_at = _now_iso()
+                self._publish_status(
+                    state="error",
+                    process_alive=True,
+                    session=session,
+                    last_error_at=failed_at,
+                    last_error_message=str(exc),
+                    event_name="送信失敗",
+                    event_detail=f"文字起こしの保存に失敗しました: {exc}",
+                    event_time=failed_at,
+                )
+                return
+
+            pending_rows.popleft()
+            created_at = str(item.get("created_at") or _now_iso())
+            self._publish_status(
+                state="running",
+                process_alive=True,
+                session=session,
+                last_success_at=created_at,
+                event_name="送信成功",
+                event_detail="文字起こしをバックエンドへ保存しました。",
+                event_time=created_at,
+            )
+            self._notify_item(item)
+
+    def _notify_item(self, item: dict[str, object]) -> None:
+        callback = self._item_callback
+        if callback is None:
+            return
+        try:
+            callback(dict(item))
+        except Exception:
+            return
+
+    def _publish_status(
+        self,
+        *,
+        state: str | None = None,
+        process_alive: bool | None = None,
+        session: str | None | object = _MISSING,
+        last_started_at: str | None | object = _MISSING,
+        last_success_at: str | None | object = _MISSING,
+        last_error_at: str | None | object = _MISSING,
+        last_error_message: str | None | object = _MISSING,
+        event_name: str | None = None,
+        event_detail: str | None = None,
+        event_time: str | None = None,
+    ) -> None:
+        with self._lock:
+            if state is not None:
+                self._status_snapshot["state"] = state
+            if process_alive is not None:
+                self._status_snapshot["process_alive"] = process_alive
+            if session is not _MISSING:
+                self._status_snapshot["session"] = session or ""
+            if last_started_at is not _MISSING:
+                self._status_snapshot["last_started_at"] = last_started_at
+            if last_success_at is not _MISSING:
+                self._status_snapshot["last_success_at"] = last_success_at
+            if last_error_at is not _MISSING:
+                self._status_snapshot["last_error_at"] = last_error_at
+            if last_error_message is not _MISSING:
+                self._status_snapshot["last_error_message"] = last_error_message
+            snapshot = dict(self._status_snapshot)
+
+        callback = self._status_callback
+        if callback is None:
+            return
+
+        event: dict[str, object] | None = None
+        if event_name is not None:
+            event = {
+                "kind": "status",
+                "event": event_name,
+                "detail": event_detail or "",
+                "created_at": event_time or _now_iso(),
+                "session": str(snapshot.get("session") or ""),
+            }
+
+        try:
+            callback(snapshot, event)
+        except Exception:
+            return
+
+    def _current_session(self) -> str | None:
+        session = self._session_provider()
+        if session is None:
+            return None
+        normalized = session.strip()
+        return normalized or None
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
+    stdin_stream = process.stdin
+    if stdin_stream is not None:
+        try:
+            stdin_stream.close()
+        except Exception:
+            pass
     if process.poll() is not None:
         return
     try:
@@ -96,70 +369,83 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
             return
 
 
-def _extract_final_text(raw_line: str) -> str | None:
-    line = raw_line.strip()
-    if not line or not line.startswith("{"):
-        return None
+def _read_transcript_row_count() -> int:
+    return len(_read_transcript_text_rows())
 
+
+def _read_new_transcript_rows(
+    processed_row_count: int,
+    session: str | None,
+) -> tuple[list[tuple[str, str]], int]:
+    rows = _read_transcript_text_rows()
+    row_count = len(rows)
+    if row_count < processed_row_count:
+        processed_row_count = row_count
+
+    if session is None:
+        return [], row_count
+
+    new_rows = [
+        (session, text)
+        for text in rows[processed_row_count:]
+        if text
+    ]
+    return new_rows, row_count
+
+
+def _read_transcript_text_rows() -> list[str]:
+    path = TRANSCRIPTION_CSV_PATH
+    if not path.is_file():
+        return []
+
+    texts: list[str] = []
     try:
-        payload = json.loads(line)
-    except json.JSONDecodeError:
+        with path.open(
+            "r",
+            encoding="utf-8-sig",
+            errors="replace",
+            newline="",
+        ) as handle:
+            reader = csv.reader(handle)
+            for row in reader:
+                text = _text_from_transcript_row(row)
+                if text is not None:
+                    texts.append(text)
+    except OSError:
+        return []
+
+    return texts
+
+
+def _text_from_transcript_row(row: list[str]) -> str | None:
+    if len(row) < 2:
         return None
 
-    return _extract_text_from_payload(payload)
-
-
-def _extract_text_from_payload(payload: object) -> str | None:
-    if not isinstance(payload, Mapping):
+    spaced_text = row[1].strip()
+    normalized_text = row[2].strip() if len(row) >= 3 else ""
+    text = normalized_text or spaced_text
+    if not text:
         return None
-    if "partial" in payload or "partial_result" in payload:
-        return None
-
-    direct_text = payload.get("text")
-    if isinstance(direct_text, str):
-        normalized = direct_text.strip()
-        if normalized:
-            return normalized
-
-    alternatives = payload.get("alternatives")
-    if isinstance(alternatives, Sequence) and not isinstance(
-        alternatives, (str, bytes, bytearray)
-    ):
-        for alternative in alternatives:
-            if not isinstance(alternative, Mapping):
-                continue
-            alt_text = alternative.get("text")
-            if isinstance(alt_text, str):
-                normalized = alt_text.strip()
-                if normalized:
-                    return normalized
-
-    result = payload.get("result")
-    if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
-        words: list[str] = []
-        for item in result:
-            if not isinstance(item, Mapping):
-                continue
-            word = item.get("word")
-            if isinstance(word, str):
-                normalized = word.strip()
-                if normalized:
-                    words.append(normalized)
-        if words:
-            return " ".join(words)
-
-    return None
+    return text
 
 
 _service_lock = threading.Lock()
 _service: TranscriptionService | None = None
 
 
-def start_transcription_service(session_provider: Callable[[], str | None]) -> None:
+def start_transcription_service(
+    session_provider: Callable[[], str | None],
+    status_callback: StatusCallback | None = None,
+    item_callback: ItemCallback | None = None,
+) -> None:
     global _service
     with _service_lock:
         if _service is None:
-            _service = TranscriptionService(session_provider)
+            _service = TranscriptionService(
+                session_provider,
+                status_callback,
+                item_callback,
+            )
         _service.start()
 
 

@@ -135,7 +135,9 @@ def main():
 
     state.request_layout_refresh = request_layout_refresh
     start_transcription_service(
-        lambda: state.CURRENT_SESSION if state.session_ready else None
+        lambda: state.CURRENT_SESSION if state.session_ready else None,
+        state.record_transcription_service_update,
+        state.append_transcription_item,
     )
 
     wrapper = tk.Frame(root, bg="#fefefe")

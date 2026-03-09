@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime
 
 import openpyxl  # noqa: F401
 import pandas as pd
@@ -71,6 +72,375 @@ def _open_history_window(root_ref: tk.Tk):
             for e in snapshot:
                 tree.insert("", "end", values=make_row(e))
             last_count[0] = current_len
+        win.after(500, refresh)
+
+    refresh()
+
+
+def _string_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _format_timestamp(value: object) -> str:
+    raw_value = _string_value(value)
+    if not raw_value:
+        return "-"
+    normalized = raw_value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return raw_value
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _transcription_badge_colors(badge: str) -> tuple[str, str]:
+    palette = {
+        "未接続": ("#475569", "#e2e8f0"),
+        "起動中": ("#9a3412", "#ffedd5"),
+        "待機中": ("#1d4ed8", "#dbeafe"),
+        "稼働中": ("#047857", "#d1fae5"),
+        "異常": ("#b91c1c", "#fee2e2"),
+        "停止": ("#374151", "#e5e7eb"),
+    }
+    return palette.get(badge, ("#0f172a", "#e2e8f0"))
+
+
+def _build_transcription_timeline(
+    items: list[dict[str, object]],
+    events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    timeline: list[dict[str, object]] = []
+
+    for item in items:
+        item_id = item.get("id")
+        sort_order = item_id if isinstance(item_id, int) else 0
+        timeline.append(
+            {
+                "kind": "transcription",
+                "created_at": _string_value(item.get("created_at")),
+                "title": "文字起こし",
+                "body": _string_value(item.get("text")),
+                "sort_order": sort_order,
+            }
+        )
+
+    event_count = len(events)
+    for index, event in enumerate(events):
+        timeline.append(
+            {
+                "kind": "status",
+                "created_at": _string_value(event.get("created_at")),
+                "title": _string_value(event.get("event")) or "状態更新",
+                "body": _string_value(event.get("detail")),
+                "sort_order": event_count - index,
+            }
+        )
+
+    timeline.sort(
+        key=lambda entry: (
+            _string_value(entry.get("created_at")),
+            1 if entry.get("kind") == "transcription" else 0,
+            int(entry.get("sort_order", 0)),
+        ),
+        reverse=True,
+    )
+    return timeline
+
+
+def _render_transcription_timeline(
+    parent: tk.Frame,
+    timeline: list[dict[str, object]],
+    session_connected: bool,
+) -> None:
+    for child in parent.winfo_children():
+        child.destroy()
+
+    if not timeline:
+        placeholder = (
+            "現在セッション未接続のため、状態イベントのみ表示します。"
+            if not session_connected
+            else "まだ文字起こし履歴はありません。"
+        )
+        tk.Label(
+            parent,
+            text=placeholder,
+            bg="#eef3f7",
+            fg="#475569",
+            justify="left",
+            wraplength=640,
+            anchor="w",
+            padx=12,
+            pady=20,
+        ).pack(fill="x")
+        return
+
+    for entry in timeline:
+        kind = _string_value(entry.get("kind"))
+        if kind == "transcription":
+            accent = "#0f766e"
+            tag_bg = "#ccfbf1"
+            card_bg = "#ffffff"
+            tag_text = "TEXT"
+        else:
+            accent = "#1d4ed8"
+            tag_bg = "#dbeafe"
+            card_bg = "#f8fbff"
+            tag_text = "STATUS"
+
+        card = tk.Frame(
+            parent,
+            bg=card_bg,
+            highlightbackground="#d7e2ec",
+            highlightthickness=1,
+            bd=0,
+            padx=16,
+            pady=14,
+        )
+        card.pack(fill="x", padx=8, pady=6)
+
+        header = tk.Frame(card, bg=card_bg)
+        header.pack(fill="x")
+
+        tk.Label(
+            header,
+            text=tag_text,
+            bg=tag_bg,
+            fg=accent,
+            padx=10,
+            pady=2,
+            font=("Yu Gothic UI", 9, "bold"),
+        ).pack(side="left")
+
+        tk.Label(
+            header,
+            text=_string_value(entry.get("title")),
+            bg=card_bg,
+            fg="#0f172a",
+            font=("Yu Gothic UI", 11, "bold"),
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Label(
+            header,
+            text=_format_timestamp(entry.get("created_at")),
+            bg=card_bg,
+            fg="#64748b",
+            font=("Yu Gothic UI", 9),
+        ).pack(side="right")
+
+        tk.Label(
+            card,
+            text=_string_value(entry.get("body")) or "-",
+            bg=card_bg,
+            fg="#1e293b",
+            justify="left",
+            anchor="w",
+            wraplength=620,
+            padx=2,
+            pady=10,
+            font=("Yu Gothic UI", 11),
+        ).pack(fill="x")
+
+
+def _open_transcription_history_window(root_ref: tk.Tk):
+    existing = state.transcription_history_window
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                existing.lift()
+                existing.focus_force()
+                return
+        except Exception:
+            pass
+
+    win = tk.Toplevel(root_ref)
+    state.transcription_history_window = win
+    win.title("文字起こし履歴")
+    win.geometry("760x720")
+    win.configure(bg="#eef3f7")
+
+    def on_close() -> None:
+        try:
+            win.destroy()
+        finally:
+            state.transcription_history_window = None
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    wrapper = tk.Frame(win, bg="#eef3f7", padx=16, pady=16)
+    wrapper.pack(expand=True, fill="both")
+
+    tk.Label(
+        wrapper,
+        text="文字起こし状態",
+        bg="#eef3f7",
+        fg="#0f172a",
+        font=("Yu Gothic UI", 16, "bold"),
+        anchor="w",
+    ).pack(fill="x")
+
+    summary = tk.Frame(
+        wrapper,
+        bg="#ffffff",
+        highlightbackground="#d7e2ec",
+        highlightthickness=1,
+        padx=18,
+        pady=16,
+    )
+    summary.pack(fill="x", pady=(12, 14))
+
+    session_var = tk.StringVar(value="現在のセッション: なし")
+    badge_var = tk.StringVar(value="未接続")
+    success_var = tk.StringVar(value="最終成功: -")
+    error_var = tk.StringVar(value="最終エラー: -")
+
+    header = tk.Frame(summary, bg="#ffffff")
+    header.pack(fill="x")
+
+    tk.Label(
+        header,
+        textvariable=session_var,
+        bg="#ffffff",
+        fg="#0f172a",
+        font=("Yu Gothic UI", 11, "bold"),
+    ).pack(side="left")
+
+    badge_label = tk.Label(
+        header,
+        textvariable=badge_var,
+        bg="#e2e8f0",
+        fg="#475569",
+        padx=12,
+        pady=4,
+        font=("Yu Gothic UI", 10, "bold"),
+    )
+    badge_label.pack(side="right")
+
+    tk.Label(
+        summary,
+        textvariable=success_var,
+        bg="#ffffff",
+        fg="#334155",
+        anchor="w",
+        justify="left",
+        font=("Yu Gothic UI", 10),
+        pady=8,
+    ).pack(fill="x")
+
+    tk.Label(
+        summary,
+        textvariable=error_var,
+        bg="#ffffff",
+        fg="#334155",
+        anchor="w",
+        justify="left",
+        wraplength=660,
+        font=("Yu Gothic UI", 10),
+    ).pack(fill="x")
+
+    tk.Label(
+        wrapper,
+        text="タイムライン",
+        bg="#eef3f7",
+        fg="#0f172a",
+        font=("Yu Gothic UI", 13, "bold"),
+        anchor="w",
+    ).pack(fill="x")
+
+    timeline_frame = tk.Frame(wrapper, bg="#eef3f7")
+    timeline_frame.pack(expand=True, fill="both", pady=(10, 0))
+
+    canvas = tk.Canvas(
+        timeline_frame,
+        bg="#eef3f7",
+        highlightthickness=0,
+        bd=0,
+    )
+    scrollbar = ttk.Scrollbar(
+        timeline_frame,
+        orient="vertical",
+        command=canvas.yview,
+    )
+    content = tk.Frame(canvas, bg="#eef3f7")
+    content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", expand=True, fill="both")
+    scrollbar.pack(side="right", fill="y")
+
+    content.bind(
+        "<Configure>",
+        lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas.bind(
+        "<Configure>",
+        lambda event: canvas.itemconfigure(content_window, width=event.width),
+    )
+
+    last_signature = [None]
+
+    def refresh() -> None:
+        if not win.winfo_exists():
+            return
+
+        status, items, events = state.snapshot_transcription_history()
+        timeline = _build_transcription_timeline(items, events)
+        signature = (
+            _string_value(status.get("badge")),
+            _string_value(status.get("session")),
+            _string_value(status.get("last_success_at")),
+            _string_value(status.get("last_error_at")),
+            _string_value(status.get("last_error_message")),
+            len(items),
+            len(events),
+            tuple(
+                (
+                    item.get("id"),
+                    _string_value(item.get("created_at")),
+                    _string_value(item.get("text")),
+                )
+                for item in items[-5:]
+            ),
+            tuple(
+                (
+                    _string_value(event.get("event")),
+                    _string_value(event.get("created_at")),
+                )
+                for event in events[-5:]
+            ),
+        )
+
+        if signature != last_signature[0]:
+            session_name = _string_value(status.get("session")) or "なし"
+            session_var.set(f"現在のセッション: {session_name}")
+
+            badge = _string_value(status.get("badge")) or "未接続"
+            badge_var.set(badge)
+            badge_fg, badge_bg = _transcription_badge_colors(badge)
+            badge_label.configure(bg=badge_bg, fg=badge_fg)
+
+            success_var.set(
+                f"最終成功: {_format_timestamp(status.get('last_success_at'))}"
+            )
+
+            last_error_at = _format_timestamp(status.get("last_error_at"))
+            last_error_message = _string_value(status.get("last_error_message"))
+            if last_error_at == "-" and not last_error_message:
+                error_text = "最終エラー: -"
+            elif last_error_message:
+                error_text = f"最終エラー: {last_error_at} / {last_error_message}"
+            else:
+                error_text = f"最終エラー: {last_error_at}"
+            error_var.set(error_text)
+
+            _render_transcription_timeline(
+                content,
+                timeline,
+                bool(_string_value(status.get("session"))),
+            )
+            last_signature[0] = signature
+
         win.after(500, refresh)
 
     refresh()
@@ -303,7 +673,7 @@ def _open_experiment_window(root_ref: tk.Tk):
 def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     menu = tk.Toplevel(root_ref)
     menu.title("コントローラーメニュー")
-    menu.geometry("350x420")
+    menu.geometry("350x470")
     menu.attributes("-topmost", True)
 
     state.menu_status_var = tk.StringVar(value="未接続")
@@ -370,6 +740,11 @@ def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     )
     tk.Button(
         menu, text="コメント履歴", command=lambda: _open_history_window(root_ref)
+    ).pack(pady=5)
+    tk.Button(
+        menu,
+        text="文字起こし履歴",
+        command=lambda: _open_transcription_history_window(root_ref),
     ).pack(pady=5)
     tk.Button(menu, text="CSV で保存", command=lambda: export_dialog("csv")).pack(
         pady=5

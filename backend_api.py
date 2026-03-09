@@ -33,7 +33,10 @@ def fetch_bootstrap(raw_session: str) -> tuple[str, list[dict[str, object]]]:
         params=params,
         timeout=BACKEND_HTTP_TIMEOUT_SEC,
     )
-    payload = _parse_json_response(response)
+    payload = _require_mapping(
+        _parse_json_payload(response),
+        "bootstrap response",
+    )
     if response.status_code != requests.codes.ok:
         error_message = payload.get("error")
         if isinstance(error_message, str) and error_message:
@@ -46,18 +49,48 @@ def fetch_bootstrap(raw_session: str) -> tuple[str, list[dict[str, object]]]:
     return session, messages
 
 
-def post_transcription(session: str, text: str) -> None:
-    response = requests.post(
+def fetch_transcriptions(raw_session: str) -> list[dict[str, object]]:
+    params: dict[str, str] = {}
+    if raw_session.strip():
+        params["session"] = raw_session
+
+    response = requests.get(
         build_api_url("/api/transcriptions"),
-        json={"session": session, "text": text},
+        params=params,
         timeout=BACKEND_HTTP_TIMEOUT_SEC,
     )
-    payload = _parse_json_response(response)
+    payload = _parse_json_payload(response)
+    if response.status_code != requests.codes.ok:
+        if isinstance(payload, Mapping):
+            error_message = payload.get("error")
+            if isinstance(error_message, str) and error_message:
+                raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+
+    raw_items = _require_list(payload, "transcriptions")
+    return [normalize_transcription_item(item) for item in raw_items]
+
+
+def post_transcription(session: str, text: str) -> dict[str, object]:
+    url = build_api_url("/api/transcriptions")
+    try:
+        response = requests.post(
+            url,
+            json={"session": session, "text": text},
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    payload = _require_mapping(
+        _parse_json_payload(response),
+        "transcription response",
+    )
     if response.status_code != requests.codes.created:
         error_message = payload.get("error")
         if isinstance(error_message, str) and error_message:
             raise BackendApiError(error_message)
         raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_transcription_item(payload)
 
 
 def parse_comment_event(raw_message: str) -> dict[str, object] | None:
@@ -96,14 +129,24 @@ def normalize_comment_item(value: object) -> dict[str, object]:
     }
 
 
-def _parse_json_response(response: requests.Response) -> Mapping[str, object]:
+def normalize_transcription_item(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "transcription")
+    created_at = _require_string(payload.get("createdAt"), "createdAt")
+    return {
+        "id": _require_int(payload.get("id"), "id"),
+        "session": _require_string(payload.get("session"), "session"),
+        "text": _require_string(payload.get("text"), "text"),
+        "created_at": created_at,
+        "server_time_iso": created_at,
+    }
+
+
+def _parse_json_payload(response: requests.Response) -> object:
     try:
         payload = response.json()
     except ValueError as exc:
         raise BackendApiError(f"{response.status_code} {response.reason}") from exc
 
-    if not isinstance(payload, Mapping):
-        raise BackendApiError("backend response is not an object")
     return payload
 
 

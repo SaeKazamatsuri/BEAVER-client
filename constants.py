@@ -3,8 +3,10 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-BASE_DIR = getattr(sys, "_MEIPASS", os.path.abspath("."))
-BUBBLE_HTML_PATH = os.path.join(BASE_DIR, "bubble.html")
+_BASE_DIR_PATH = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+BASE_DIR = str(_BASE_DIR_PATH)
+BUBBLE_HTML_PATH = str(_BASE_DIR_PATH / "bubble.html")
+DEFAULT_PUBLIC_BACKEND_BASE_URL = "https://api.beaver.works"
 
 
 def _trim_trailing_slash(value: str) -> str:
@@ -22,7 +24,7 @@ def _derive_ws_base_url(base_url: str) -> str:
 BACKEND_BASE_URL = _trim_trailing_slash(
     os.environ.get("BACKEND_BASE_URL")
     or os.environ.get("RELAY_SERVER_URL")
-    or "https://api.beaver.works"
+    or DEFAULT_PUBLIC_BACKEND_BASE_URL
 )
 BACKEND_WS_BASE_URL = _trim_trailing_slash(
     os.environ.get("BACKEND_WS_BASE_URL") or _derive_ws_base_url(BACKEND_BASE_URL)
@@ -30,7 +32,8 @@ BACKEND_WS_BASE_URL = _trim_trailing_slash(
 BACKEND_WS_ORIGIN = os.environ.get("BACKEND_WS_ORIGIN", "https://beaver.works")
 BACKEND_HTTP_TIMEOUT_SEC = 10
 
-TRANSCRIPTION_WORK_DIR = Path(BASE_DIR) / "transcription"
+TRANSCRIPTION_WORK_DIR = _BASE_DIR_PATH / "transcription"
+TRANSCRIPTION_CSV_PATH = TRANSCRIPTION_WORK_DIR / "transcript.csv"
 TRANSCRIPTION_EXECUTABLE_PATH = TRANSCRIPTION_WORK_DIR / "vosk.exe"
 
 STAMP_BALLOON_LIFETIME_SEC = 8.0
