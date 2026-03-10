@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import subprocess
+import sys
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -25,6 +26,50 @@ def _now_iso() -> str:
         datetime.now(timezone.utc)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
+    )
+
+
+def _build_hidden_process_options() -> tuple[subprocess.STARTUPINFO | None, int]:
+    if sys.platform != "win32":
+        return None, 0
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return startupinfo, subprocess.CREATE_NO_WINDOW
+
+
+def _start_transcription_process() -> subprocess.Popen[str]:
+    command = [
+        str(TRANSCRIPTION_EXECUTABLE_PATH),
+        "--output-csv",
+        str(TRANSCRIPTION_CSV_PATH),
+        "--quiet",
+    ]
+    startupinfo, creationflags = _build_hidden_process_options()
+    if startupinfo is None:
+        return subprocess.Popen(
+            command,
+            cwd=str(TRANSCRIPTION_WORK_DIR),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    return subprocess.Popen(
+        command,
+        cwd=str(TRANSCRIPTION_WORK_DIR),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        startupinfo=startupinfo,
+        creationflags=creationflags,
     )
 
 
@@ -98,34 +143,24 @@ class TranscriptionService:
         current_session = self._current_session()
         if not TRANSCRIPTION_EXECUTABLE_PATH.is_file():
             missing_at = _now_iso()
+            missing_message = (
+                "文字起こし実行ファイルが見つかりません: "
+                f"{TRANSCRIPTION_EXECUTABLE_PATH}"
+            )
             self._publish_status(
                 state="error",
                 process_alive=False,
                 session=current_session,
                 last_error_at=missing_at,
-                last_error_message="文字起こし実行ファイルが見つかりません。",
+                last_error_message=missing_message,
                 event_name="実行ファイル未検出",
-                event_detail=f"{TRANSCRIPTION_EXECUTABLE_PATH.name} が見つかりません。",
+                event_detail=missing_message,
                 event_time=missing_at,
             )
             return
 
         try:
-            process = subprocess.Popen(
-                [
-                    str(TRANSCRIPTION_EXECUTABLE_PATH),
-                    "--output-csv",
-                    str(TRANSCRIPTION_CSV_PATH),
-                    "--quiet",
-                ],
-                cwd=str(TRANSCRIPTION_WORK_DIR),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            process = _start_transcription_process()
         except OSError as exc:
             failed_at = _now_iso()
             self._publish_status(

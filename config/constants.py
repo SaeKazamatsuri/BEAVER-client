@@ -3,7 +3,39 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-_BASE_DIR_PATH = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+def _candidate_base_dir_paths() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if isinstance(bundle_dir, str) and bundle_dir:
+        candidates.append(Path(bundle_dir))
+
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+
+    candidates.append(Path(__file__).resolve().parent.parent)
+
+    unique_candidates: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+    return tuple(unique_candidates)
+
+
+def _resolve_base_dir() -> Path:
+    return _candidate_base_dir_paths()[0]
+
+
+def _resolve_transcription_work_dir() -> Path:
+    for base_dir in _candidate_base_dir_paths():
+        transcription_dir = base_dir / "transcription"
+        if transcription_dir.is_dir():
+            return transcription_dir
+    return _resolve_base_dir() / "transcription"
+
+
+_BASE_DIR_PATH = _resolve_base_dir()
 BASE_DIR = str(_BASE_DIR_PATH)
 DEFAULT_PUBLIC_BACKEND_BASE_URL = "https://api.beaver.works"
 
@@ -31,7 +63,7 @@ BACKEND_WS_BASE_URL = _trim_trailing_slash(
 BACKEND_WS_ORIGIN = os.environ.get("BACKEND_WS_ORIGIN", "https://beaver.works")
 BACKEND_HTTP_TIMEOUT_SEC = 10
 
-TRANSCRIPTION_WORK_DIR = _BASE_DIR_PATH / "transcription"
+TRANSCRIPTION_WORK_DIR = _resolve_transcription_work_dir()
 TRANSCRIPTION_CSV_PATH = TRANSCRIPTION_WORK_DIR / "transcript.csv"
 TRANSCRIPTION_EXECUTABLE_PATH = TRANSCRIPTION_WORK_DIR / "vosk.exe"
 

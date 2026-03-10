@@ -4,7 +4,6 @@ import queue
 import threading
 import time
 from collections import deque
-from typing import Callable
 
 import tkinter as tk
 
@@ -37,7 +36,6 @@ menu_session_var: tk.StringVar | None = None
 menu_current_session_var: tk.StringVar | None = None
 experiment_window: tk.Toplevel | None = None
 transcription_history_window: tk.Toplevel | None = None
-request_layout_refresh: Callable[[], None] | None = None
 
 # --- Experiment (stamp) settings ---
 # These values are intentionally mutable so experiments can tweak them at runtime.

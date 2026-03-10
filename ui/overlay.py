@@ -29,6 +29,7 @@ from config.constants import (
     STAMP_RECENT_WINDOW_SEC,
 )
 from state import app_state as state
+from ui.display_layout import WindowRect
 
 
 def coerce_ts_seconds(entry: dict) -> float | None:
@@ -319,11 +320,11 @@ def _raise_overlay_window() -> None:
         pass
 
 
-def update_overlay_geometry(geometry: str, width: int, height: int) -> None:
+def update_overlay_geometry(rect: WindowRect) -> None:
     if state.overlay_window is None or state.overlay_canvas is None:
         return
-    state.overlay_window.geometry(geometry)
-    state.overlay_canvas.config(width=width, height=height)
+    state.overlay_window.geometry(rect.to_geometry())
+    state.overlay_canvas.config(width=rect.width, height=rect.height)
     _raise_overlay_window()
 
 

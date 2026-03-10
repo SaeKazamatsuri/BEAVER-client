@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from datetime import datetime
 
 import openpyxl  # noqa: F401
@@ -446,7 +447,10 @@ def _open_transcription_history_window(root_ref: tk.Tk):
     refresh()
 
 
-def _open_experiment_window(root_ref: tk.Tk):
+def _open_experiment_window(
+    root_ref: tk.Tk,
+    refresh_layout_callback: Callable[[], None],
+) -> None:
     existing = state.experiment_window
     if existing is not None:
         try:
@@ -486,15 +490,13 @@ def _open_experiment_window(root_ref: tk.Tk):
     area_frame.pack(fill="x", pady=(0, 10))
     area_var = tk.StringVar(value=getattr(state, "stamp_area_mode", "comment"))
 
-    def set_area_mode():
+    def set_area_mode() -> None:
         state.stamp_area_mode = area_var.get()
         refresh_corner_controls()
-        cb = getattr(state, "request_layout_refresh", None)
-        if cb is not None:
-            try:
-                cb()
-            except Exception:
-                pass
+        try:
+            refresh_layout_callback()
+        except Exception:
+            pass
 
     ttk.Radiobutton(
         area_frame,
@@ -520,7 +522,7 @@ def _open_experiment_window(root_ref: tk.Tk):
     state.stamp_origin_corner = initial_corner
     corner_var = tk.StringVar(value=initial_corner)
 
-    def set_corner():
+    def set_corner() -> None:
         state.stamp_origin_corner = corner_var.get()
 
     corner_grid = ttk.Frame(corner_frame)
@@ -556,7 +558,7 @@ def _open_experiment_window(root_ref: tk.Tk):
     speed_min_var = tk.DoubleVar(value=getattr(state, "stamp_speed_min_px_s", 90.0))
     speed_max_var = tk.DoubleVar(value=getattr(state, "stamp_speed_max_px_s", 200.0))
 
-    def set_speed_min(value: str):
+    def set_speed_min(value: str) -> None:
         try:
             v = float(value)
         except Exception:
@@ -566,7 +568,7 @@ def _open_experiment_window(root_ref: tk.Tk):
             speed_max_var.set(v)
             state.stamp_speed_max_px_s = v
 
-    def set_speed_max(value: str):
+    def set_speed_max(value: str) -> None:
         try:
             v = float(value)
         except Exception:
@@ -606,7 +608,7 @@ def _open_experiment_window(root_ref: tk.Tk):
         value=getattr(state, "stamp_distance_limit_percent", 0.0)
     )
 
-    def set_distance(value: str):
+    def set_distance(value: str) -> None:
         try:
             v = float(value)
         except Exception:
@@ -632,7 +634,7 @@ def _open_experiment_window(root_ref: tk.Tk):
     lifetime_frame.pack(fill="x", pady=(0, 10))
     lifetime_var = tk.DoubleVar(value=getattr(state, "stamp_lifetime_sec", 8.0))
 
-    def set_lifetime(value: str):
+    def set_lifetime(value: str) -> None:
         try:
             v = float(value)
         except Exception:
@@ -654,7 +656,7 @@ def _open_experiment_window(root_ref: tk.Tk):
     actions = ttk.Frame(container)
     actions.pack(fill="x", pady=(8, 0))
 
-    def reset_defaults():
+    def reset_defaults() -> None:
         state.reset_stamp_experiment_settings()
         area_var.set(state.stamp_area_mode)
         corner_var.set(state.stamp_origin_corner)
@@ -670,7 +672,11 @@ def _open_experiment_window(root_ref: tk.Tk):
     ttk.Button(actions, text="閉じる", command=on_close).pack(side="right")
 
 
-def create_menu_window(switch_display_callback, root_ref: tk.Tk):
+def create_menu_window(
+    switch_display_callback: Callable[[], None],
+    refresh_layout_callback: Callable[[], None],
+    root_ref: tk.Tk,
+) -> None:
     menu = tk.Toplevel(root_ref)
     menu.title("コントローラーメニュー")
     menu.geometry("350x470")
@@ -735,9 +741,11 @@ def create_menu_window(switch_display_callback, root_ref: tk.Tk):
     tk.Button(menu, text="ディスプレイ切替", command=switch_display_callback).pack(
         pady=8
     )
-    tk.Button(menu, text="実験", command=lambda: _open_experiment_window(root_ref)).pack(
-        pady=5
-    )
+    tk.Button(
+        menu,
+        text="実験",
+        command=lambda: _open_experiment_window(root_ref, refresh_layout_callback),
+    ).pack(pady=5)
     tk.Button(
         menu, text="コメント履歴", command=lambda: _open_history_window(root_ref)
     ).pack(pady=5)
