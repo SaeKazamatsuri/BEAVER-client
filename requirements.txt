@@ -1,4 +1,3 @@
-tkinterweb
 screeninfo
 pywin32
 pandas

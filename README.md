@@ -1,7 +1,7 @@
 # BEAVER-client
 
-**BEAVER-client** は、Python と HTML を使ったクライアントアプリケーションです。
-ユーザーインターフェース表示用の HTML ファイルと、それを表示／制御する Pythonで構成されています。
+**BEAVER-client** は、Python 製のクライアントアプリケーションです。
+ユーザーインターフェースは `tkinter` ベースで構成されています。
 また、**BEAVER-server**がないと動作しません。
 
 ---

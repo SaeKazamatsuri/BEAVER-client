@@ -5,7 +5,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 _BASE_DIR_PATH = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 BASE_DIR = str(_BASE_DIR_PATH)
-BUBBLE_HTML_PATH = str(_BASE_DIR_PATH / "bubble.html")
 DEFAULT_PUBLIC_BACKEND_BASE_URL = "https://api.beaver.works"
 
 

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import html
 import queue
-import re
 
 import tkinter as tk
 from screeninfo import get_monitors
-from tkinterweb import HtmlFrame
 
 import app_state as state
-from constants import BUBBLE_HTML_PATH
+from comment_ui import COMMENT_COLUMN_BG, CommentListView, comment_entry_from_message
 from events import disconnect_session
 from overlay import (
     annotate_entry,
@@ -22,26 +19,10 @@ from overlay import (
 from transcription_service import start_transcription_service, stop_transcription_service
 from ui import create_menu_window, set_always_on_top
 
-
-def escape_with_wbr(text: str, chunk: int = 16) -> str:
-    if text is None:
-        text = ""
-    else:
-        text = str(text)
-
-    escaped = html.escape(text)
-
-    pattern = re.compile(r"[0-9A-Za-z_./:-]{32,}")
-
-    def insert_wbr(match: re.Match) -> str:
-        word = match.group(0)
-        parts = [word[i : i + chunk] for i in range(0, len(word), chunk)]
-        return "<wbr>".join(parts)
-
-    return pattern.sub(insert_wbr, escaped)
+COMMENT_POLL_INTERVAL_MS = 100
 
 
-def main():
+def main() -> None:
     state.root = tk.Tk()
     root = state.root
     root.title("コメント表示")
@@ -66,26 +47,34 @@ def main():
         state_cache["height"] = height
         update_overlay_geometry(geometry, width, height)
 
-    def _comment_rect(scr) -> tuple[int, int, int, int]:
-        comment_w = max(1, scr.width // 4)
-        comment_h = max(1, scr.height)
-        comment_x = scr.x + scr.width - comment_w
-        comment_y = scr.y
+    def _comment_rect(scr: object) -> tuple[int, int, int, int]:
+        width = int(getattr(scr, "width"))
+        height = int(getattr(scr, "height"))
+        x = int(getattr(scr, "x"))
+        y = int(getattr(scr, "y"))
+        comment_w = max(1, width // 4)
+        comment_h = max(1, height)
+        comment_x = x + width - comment_w
+        comment_y = y
         return comment_w, comment_h, comment_x, comment_y
 
-    def _overlay_rect(scr) -> tuple[int, int, int, int]:
+    def _overlay_rect(scr: object) -> tuple[int, int, int, int]:
+        screen_width = int(getattr(scr, "width"))
+        screen_height = int(getattr(scr, "height"))
+        screen_x = int(getattr(scr, "x"))
+        screen_y = int(getattr(scr, "y"))
         comment_w, _, _, _ = _comment_rect(scr)
         mode = getattr(state, "stamp_area_mode", "comment")
         if mode == "left75":
-            overlay_w = max(1, scr.width - comment_w)
-            overlay_h = max(1, scr.height)
-            overlay_x = scr.x
-            overlay_y = scr.y
+            overlay_w = max(1, screen_width - comment_w)
+            overlay_h = max(1, screen_height)
+            overlay_x = screen_x
+            overlay_y = screen_y
             return overlay_w, overlay_h, overlay_x, overlay_y
         overlay_w = max(1, comment_w)
-        overlay_h = max(1, scr.height)
-        overlay_x = scr.x + scr.width - overlay_w
-        overlay_y = scr.y
+        overlay_h = max(1, screen_height)
+        overlay_x = screen_x + screen_width - overlay_w
+        overlay_y = screen_y
         return overlay_w, overlay_h, overlay_x, overlay_y
 
     def _apply_layout(update_root: bool) -> None:
@@ -102,21 +91,19 @@ def main():
         overlay_geometry = f"{overlay_w}x{overlay_h}+{overlay_x}+{overlay_y}"
         _apply_overlay_geometry(overlay_geometry, overlay_w, overlay_h)
 
-    def sync_overlay_position(event=None):
-        if root is None:
-            return
+    def sync_overlay_position(event: tk.Event | None = None) -> None:
         if getattr(state, "stamp_area_mode", "comment") != "comment":
             return
         geometry = root.winfo_geometry()
-        width = event.width if event is not None else root.winfo_width()
-        height = event.height if event is not None else root.winfo_height()
+        width = int(event.width) if event is not None else root.winfo_width()
+        height = int(event.height) if event is not None else root.winfo_height()
         _apply_overlay_geometry(geometry, width, height)
 
-    def update_monitor_position():
+    def update_monitor_position() -> None:
         _apply_layout(update_root=True)
 
     update_monitor_position()
-    root.configure(bg="#fefefe")
+    root.configure(bg=COMMENT_COLUMN_BG)
     root.attributes("-topmost", True)
     root.update()
     set_always_on_top(root.winfo_id())
@@ -140,141 +127,25 @@ def main():
         state.append_transcription_item,
     )
 
-    wrapper = tk.Frame(root, bg="#fefefe")
+    wrapper = tk.Frame(root, bg=COMMENT_COLUMN_BG)
     wrapper.pack(expand=True, fill="both")
 
-    html_frame = HtmlFrame(
-        wrapper, horizontal_scrollbar=False, vertical_scrollbar=False
-    )
-    html_frame.pack(expand=True, fill="both")
+    comment_list = CommentListView(wrapper)
+    comment_list.pack(expand=True, fill="both")
 
-    for child in html_frame.winfo_children():
-        if child.winfo_class() == "Scrollbar":
-            child.pack_forget()
+    rendered_generation, existing_comments = state.snapshot_messages()
+    if existing_comments:
+        comment_list.set_comments(existing_comments)
+    rendered_generation_state = [rendered_generation]
 
-    with open(BUBBLE_HTML_PATH, encoding="utf-8") as fp:
-        bubble_html = fp.read()
+    def update_comments() -> None:
+        generation, comments = state.snapshot_messages()
+        if generation != rendered_generation_state[0]:
+            comment_list.clear()
+            if comments:
+                comment_list.set_comments(comments)
+            rendered_generation_state[0] = generation
 
-    last_html = [""]
-
-    style_block = """
-<style>
-html, body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-  font-family: "Noto Sans JP", sans-serif;
-  background-color: #6dd3f7;
-}
-#app-root {
-  position: relative;
-  width: 100%;
-  height: 100vh;
-  overflow: hidden;
-  background-color: #6dd3f7;
-}
-#comment-column {
-  position: relative;
-  height: 100%;
-  overflow-y: auto;
-  padding: 28px 20px 40px 20px;
-  box-sizing: border-box;
-}
-#comment-column::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-.comment-wrapper {
-  position: relative;
-  max-width: 92%;
-  margin: 0 auto 16px auto;
-}
-.comment-wrapper:last-child {
-  margin-bottom: 0;
-}
-.shadow-box {
-  position: absolute;
-  top: 12px;
-  left: 8px;
-  width: calc(100% - 16px);
-  height: calc(100% - 12px);
-  background-color: rgba(11, 31, 51, 0.15);
-  border-radius: 32px;
-  z-index: 0;
-}
-.shadow-box::after {
-  content: "";
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
-  border: 2px dashed rgba(11, 31, 51, 0.3);
-  border-radius: 28px;
-}
-.comment-box {
-  position: relative;
-  background-color: #fff;
-  border-radius: 32px;
-  padding: 20px 28px 10px 28px;
-  z-index: 1;
-  border: 3px solid #0b1f33;
-  box-shadow: 0 16px 32px rgba(11, 31, 51, 0.25);
-}
-.comment-box::after {
-  content: "";
-  position: absolute;
-  width: 60px;
-  height: 60px;
-  background-image: url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='20' cy='20' r='3' fill='%230b1f33' fill-opacity='0.12'/%3E%3C/svg%3E");
-  background-repeat: repeat;
-  top: 18px;
-  right: 24px;
-  opacity: 0.35;
-}
-.name-label {
-  position: absolute;
-  top: -18px;
-  left: 32px;
-  background-color: #fffdaf;
-  padding: 8px 24px;
-  border-radius: 999px;
-  border: 2px solid #0b1f33;
-  font-weight: bold;
-  box-shadow: 4px 6px 0 rgba(11, 31, 51, 0.3);
-}
-.comment-name-time {
-  font-size: 14px;
-  color: #72809a;
-  margin-bottom: 12px;
-  text-align: right;
-}
-.comment-text {
-  font-size: 28px;
-  line-height: 1.45;
-  color: #0b1f33;
-  font-weight: 500;
-  white-space: pre-wrap;
-}
-.like {
-  margin-top: 4px;
-  min-height: 0;
-}
-</style>
-""".strip()
-
-    if "</head>" in bubble_html:
-        base_html = bubble_html.replace("</head>", f"{style_block}</head>")
-    elif "<body" in bubble_html:
-        base_html = bubble_html.replace("<body>", f"<body>{style_block}")
-    else:
-        base_html = style_block + bubble_html
-
-    comment_placeholder = "<!--COMMENT_COLUMN-->"
-
-    def update_comments():
         try:
             while True:
                 raw = state.message_queue.get_nowait()
@@ -284,44 +155,17 @@ html, body {
                         continue
                     enqueue_stamp_balloon(entry)
                     continue
-                state.messages.append(entry)
+                comment_entry = comment_entry_from_message(entry)
+                if comment_entry is None:
+                    continue
+                state.append_message(comment_entry)
+                comment_list.add_comment(comment_entry)
         except queue.Empty:
             pass
 
-        comment_items = []
-        for msg in reversed(state.messages):
-            name = html.escape(msg.get("name", ""))
-            tstr = html.escape(str(msg.get("time", "")))
-            time_part = f"<span style='font-weight:normal;color:#666;'>{tstr}</span>"
-            text_html = escape_with_wbr(msg.get("text", ""))
-            item = f"""
-            <div class="comment-wrapper">
-              <div class="shadow-box"></div>
-              <div class="comment-box">
-                <div class="name-label">{name}</div>
-                <div class="comment-name-time">{time_part}</div>
-                <div class="comment-text">{text_html}</div>
-                <div class="like"></div>
-              </div>
-            </div>
-            """
-            comment_items.append(item)
+        root.after(COMMENT_POLL_INTERVAL_MS, update_comments)
 
-        comment_html = "\n".join(comment_items)
-        full_html = base_html
-        if comment_placeholder in full_html:
-            full_html = full_html.replace(comment_placeholder, comment_html, 1)
-        else:
-            full_html = full_html.replace("</body>", f"{comment_html}</body>")
-        if full_html != last_html[0]:
-            try:
-                html_frame.load_html(full_html)
-                last_html[0] = full_html
-            except Exception:
-                pass
-        root.after(500, update_comments)
-
-    def switch_display():
+    def switch_display() -> None:
         if not monitors:
             return
         current_monitor[0] = (current_monitor[0] + 1) % len(monitors)
@@ -330,7 +174,7 @@ html, body {
     create_menu_window(switch_display, root)
     update_comments()
 
-    def on_close():
+    def on_close() -> None:
         disconnect_session(show_status=False)
         stop_transcription_service()
         stop_overlay()

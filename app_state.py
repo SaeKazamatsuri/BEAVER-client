@@ -8,19 +8,22 @@ from typing import Callable
 
 import tkinter as tk
 
+from comment_ui import CommentEntry
 from constants import (
     STAMP_BALLOON_LIFETIME_SEC,
     STAMP_BALLOON_MAX_SPEED_PX,
     STAMP_BALLOON_MIN_SPEED_PX,
 )
 
-message_queue: queue.Queue = queue.Queue()
-message_log: list[dict] = []
-messages: list[dict] = []
+message_queue: queue.Queue[dict[str, object]] = queue.Queue()
+message_log: list[dict[str, object]] = []
+messages: list[CommentEntry] = []
+_message_lock = threading.Lock()
+_message_generation = 0
 
 overlay_window: tk.Toplevel | None = None
 overlay_canvas: tk.Canvas | None = None
-overlay_balloons: list[dict] = []
+overlay_balloons: list[dict[str, object]] = []
 overlay_animating = False
 overlay_last_tick = [time.monotonic()]
 recent_stamp_ids: deque[str] = deque()
@@ -80,6 +83,23 @@ transcription_status: dict[str, object] = {
     "last_error_at": None,
     "last_error_message": None,
 }
+
+
+def clear_messages() -> None:
+    global _message_generation
+    with _message_lock:
+        messages.clear()
+        _message_generation += 1
+
+
+def append_message(entry: CommentEntry) -> None:
+    with _message_lock:
+        messages.append(entry)
+
+
+def snapshot_messages() -> tuple[int, list[CommentEntry]]:
+    with _message_lock:
+        return _message_generation, list(messages)
 
 
 def safe_set(var: tk.StringVar | None, text: str) -> None:

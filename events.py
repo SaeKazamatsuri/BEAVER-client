@@ -270,7 +270,7 @@ def connect_session(session_name: str):
     def _do_connect():
         state.safe_set(state.menu_status_var, "接続中…")
         try:
-            state.messages.clear()
+            state.clear_messages()
             disconnect_session(show_status=False)
             _clear_message_queue()
 
