@@ -1,23 +1,37 @@
 from __future__ import annotations
 
 import io
-from collections.abc import Callable
-from datetime import datetime
+from collections.abc import Callable, Sequence
 
-import openpyxl  # noqa: F401
-import pandas as pd
 import tkinter as tk
-import tkinter.ttk as ttk
-import win32con
-import win32gui
 from tkinter import filedialog, messagebox
 
 from services.events import connect_session, disconnect_session
 from services.transcription_service import stop_transcription_service
 from state import app_state as state
+from ui.admin_cards import (
+    AdminListCard,
+    CommentHistoryRow,
+    build_comment_history_rows,
+    build_comment_history_signature,
+    build_transcription_timeline,
+    format_timestamp as _format_timestamp,
+    string_value as _string_value,
+)
+from ui.file_utils import build_export_filename
+from ui import admin_theme
+
+try:
+    import win32con
+    import win32gui
+except ModuleNotFoundError:
+    win32con = None
+    win32gui = None
 
 
-def set_always_on_top(hwnd):
+def set_always_on_top(hwnd: int) -> None:
+    if win32con is None or win32gui is None:
+        return
     win32gui.SetWindowPos(
         hwnd,
         win32con.HWND_TOPMOST,
@@ -29,237 +43,325 @@ def set_always_on_top(hwnd):
     )
 
 
-def _open_history_window(root_ref: tk.Tk):
-    win = tk.Toplevel(root_ref)
-    win.title("コメント履歴")
-    win.geometry("560x600")
-
-    frame = ttk.Frame(win)
-    frame.pack(expand=True, fill="both")
-
-    columns = ("time", "name", "content")
-    tree = ttk.Treeview(frame, columns=columns, show="headings")
-    tree.heading("time", text="時間")
-    tree.heading("name", text="名前")
-    tree.heading("content", text="内容")
-    tree.column("time", width=120, anchor="w")
-    tree.column("name", width=120, anchor="w")
-    tree.column("content", width=300, anchor="w")
-
-    vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=vsb.set)
-    tree.pack(side="left", expand=True, fill="both")
-    vsb.pack(side="right", fill="y")
-
-    last_count = [-1]
-
-    def make_row(e: dict) -> tuple[str, str, str]:
-        t = str(e.get("time", "")) if e.get("time") is not None else ""
-        n = str(e.get("name", "")) if e.get("name") is not None else ""
-        if e.get("stamp_url") or e.get("stamp"):
-            s = e.get("stamp_url") or e.get("stamp")
-            c = f"スタンプ: {s}"
-        else:
-            c = str(e.get("text", "")) if e.get("text") is not None else ""
-        return (t, n, c)
-
-    def refresh():
-        if not win.winfo_exists():
-            return
-        current_len = len(state.message_log)
-        if current_len != last_count[0]:
-            tree.delete(*tree.get_children())
-            snapshot = list(state.message_log)
-            for e in snapshot:
-                tree.insert("", "end", values=make_row(e))
-            last_count[0] = current_len
-        win.after(500, refresh)
-
-    refresh()
+def _default_export_filename(extension: str) -> str:
+    session_name = _string_value(getattr(state, "CURRENT_SESSION", "")).strip()
+    if not session_name:
+        menu_session_var = state.menu_session_var
+        if menu_session_var is not None:
+            session_name = menu_session_var.get().strip()
+    return build_export_filename(session_name, extension)
 
 
-def _string_value(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    return ""
-
-
-def _format_timestamp(value: object) -> str:
-    raw_value = _string_value(value)
-    if not raw_value:
-        return "-"
-    normalized = raw_value.replace("Z", "+00:00")
+def _focus_existing_window(window: tk.Toplevel | None) -> bool:
+    if window is None:
+        return False
     try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return raw_value
-    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        if window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return True
+    except Exception:
+        return False
+    return False
 
 
-def _transcription_badge_colors(badge: str) -> tuple[str, str]:
-    palette = {
-        "未接続": ("#475569", "#e2e8f0"),
-        "起動中": ("#9a3412", "#ffedd5"),
-        "待機中": ("#1d4ed8", "#dbeafe"),
-        "稼働中": ("#047857", "#d1fae5"),
-        "異常": ("#b91c1c", "#fee2e2"),
-        "停止": ("#374151", "#e5e7eb"),
-    }
-    return palette.get(badge, ("#0f172a", "#e2e8f0"))
+def _create_window_header(
+    parent: tk.Misc,
+    *,
+    title: str,
+    description: str,
+    wraplength: int = 680,
+) -> None:
+    tk.Label(
+        parent,
+        text=title,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.WINDOW_TITLE_FONT,
+        anchor="w",
+    ).pack(fill="x")
+    tk.Label(
+        parent,
+        text=description,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        justify="left",
+        anchor="w",
+        wraplength=wraplength,
+        pady=6,
+    ).pack(fill="x")
 
 
-def _build_transcription_timeline(
-    items: list[dict[str, object]],
-    events: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    timeline: list[dict[str, object]] = []
-
-    for item in items:
-        item_id = item.get("id")
-        sort_order = item_id if isinstance(item_id, int) else 0
-        timeline.append(
-            {
-                "kind": "transcription",
-                "created_at": _string_value(item.get("created_at")),
-                "title": "文字起こし",
-                "body": _string_value(item.get("text")),
-                "sort_order": sort_order,
-            }
-        )
-
-    event_count = len(events)
-    for index, event in enumerate(events):
-        timeline.append(
-            {
-                "kind": "status",
-                "created_at": _string_value(event.get("created_at")),
-                "title": _string_value(event.get("event")) or "状態更新",
-                "body": _string_value(event.get("detail")),
-                "sort_order": event_count - index,
-            }
-        )
-
-    timeline.sort(
-        key=lambda entry: (
-            _string_value(entry.get("created_at")),
-            1 if entry.get("kind") == "transcription" else 0,
-            int(entry.get("sort_order", 0)),
-        ),
-        reverse=True,
-    )
-    return timeline
+def _create_section_label(parent: tk.Misc, text: str) -> None:
+    tk.Label(
+        parent,
+        text=text,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.SECTION_TITLE_FONT,
+        anchor="w",
+        pady=2,
+    ).pack(fill="x")
 
 
-def _render_transcription_timeline(
+def _create_titled_card(
+    parent: tk.Misc,
+    *,
+    title: str,
+    description: str | None = None,
+    background: str = admin_theme.SURFACE_BG,
+    wraplength: int = 680,
+) -> tk.Frame:
+    card = admin_theme.create_card(parent, background=background)
+    card.pack(fill="x", pady=(10, 0))
+    tk.Label(
+        card,
+        text=title,
+        bg=background,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.CARD_TITLE_FONT,
+        anchor="w",
+    ).pack(fill="x")
+    if description:
+        tk.Label(
+            card,
+            text=description,
+            bg=background,
+            fg=admin_theme.SUBTLE_TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=wraplength,
+            pady=6,
+        ).pack(fill="x")
+    return card
+
+
+def _render_card_list(
     parent: tk.Frame,
-    timeline: list[dict[str, object]],
-    session_connected: bool,
+    cards: Sequence[AdminListCard],
+    *,
+    empty_message: str,
 ) -> None:
     for child in parent.winfo_children():
         child.destroy()
 
-    if not timeline:
-        placeholder = (
-            "現在セッション未接続のため、状態イベントのみ表示します。"
-            if not session_connected
-            else "まだ文字起こし履歴はありません。"
-        )
+    if not cards:
         tk.Label(
             parent,
-            text=placeholder,
-            bg="#eef3f7",
-            fg="#475569",
+            text=empty_message,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.SUBTLE_TEXT_COLOR,
             justify="left",
             wraplength=640,
             anchor="w",
             padx=12,
             pady=20,
+            font=admin_theme.BODY_FONT,
         ).pack(fill="x")
         return
 
-    for entry in timeline:
-        kind = _string_value(entry.get("kind"))
-        if kind == "transcription":
-            accent = "#0f766e"
-            tag_bg = "#ccfbf1"
-            card_bg = "#ffffff"
-            tag_text = "TEXT"
-        else:
-            accent = "#1d4ed8"
-            tag_bg = "#dbeafe"
-            card_bg = "#f8fbff"
-            tag_text = "STATUS"
-
-        card = tk.Frame(
+    for entry in cards:
+        palette = admin_theme.get_list_card_palette(entry.kind)
+        card = admin_theme.create_card(
             parent,
-            bg=card_bg,
-            highlightbackground="#d7e2ec",
-            highlightthickness=1,
-            bd=0,
+            background=palette.card_background,
             padx=16,
             pady=14,
         )
         card.pack(fill="x", padx=8, pady=6)
 
-        header = tk.Frame(card, bg=card_bg)
+        header = tk.Frame(card, bg=palette.card_background)
         header.pack(fill="x")
 
         tk.Label(
             header,
-            text=tag_text,
-            bg=tag_bg,
-            fg=accent,
+            text=entry.tag_text,
+            bg=palette.tag_background,
+            fg=palette.accent,
             padx=10,
             pady=2,
-            font=("Yu Gothic UI", 9, "bold"),
+            font=admin_theme.SMALL_BOLD_FONT,
         ).pack(side="left")
 
         tk.Label(
             header,
-            text=_string_value(entry.get("title")),
-            bg=card_bg,
-            fg="#0f172a",
-            font=("Yu Gothic UI", 11, "bold"),
+            text=entry.title or "-",
+            bg=palette.card_background,
+            fg=admin_theme.TITLE_COLOR,
+            font=admin_theme.CARD_TITLE_FONT,
         ).pack(side="left", padx=(10, 0))
 
         tk.Label(
             header,
-            text=_format_timestamp(entry.get("created_at")),
-            bg=card_bg,
-            fg="#64748b",
-            font=("Yu Gothic UI", 9),
+            text=entry.timestamp,
+            bg=palette.card_background,
+            fg=admin_theme.MUTED_TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
         ).pack(side="right")
 
         tk.Label(
             card,
-            text=_string_value(entry.get("body")) or "-",
-            bg=card_bg,
-            fg="#1e293b",
+            text=entry.body or "-",
+            bg=palette.card_background,
+            fg=admin_theme.TEXT_COLOR,
             justify="left",
             anchor="w",
             wraplength=620,
             padx=2,
             pady=10,
-            font=("Yu Gothic UI", 11),
+            font=admin_theme.BODY_FONT,
         ).pack(fill="x")
 
 
-def _open_transcription_history_window(root_ref: tk.Tk):
-    existing = state.transcription_history_window
-    if existing is not None:
-        try:
-            if existing.winfo_exists():
-                existing.lift()
-                existing.focus_force()
-                return
-        except Exception:
-            pass
+def _render_comment_history_rows(
+    parent: tk.Frame,
+    rows: Sequence[CommentHistoryRow],
+    *,
+    empty_message: str,
+) -> None:
+    for child in parent.winfo_children():
+        child.destroy()
+
+    if not rows:
+        tk.Label(
+            parent,
+            text=empty_message,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.SUBTLE_TEXT_COLOR,
+            justify="left",
+            wraplength=640,
+            anchor="w",
+            padx=6,
+            pady=12,
+            font=admin_theme.BODY_FONT,
+        ).pack(fill="x")
+        return
+
+    last_index = len(rows) - 1
+    for index, entry in enumerate(rows):
+        row = tk.Frame(parent, bg=admin_theme.WINDOW_BG, padx=6, pady=4)
+        row.pack(fill="x")
+        row.grid_columnconfigure(2, weight=1)
+
+        tk.Label(
+            row,
+            text=entry.timestamp,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.MUTED_TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            anchor="w",
+            width=10,
+        ).grid(row=0, column=0, sticky="nw", padx=(0, 10))
+
+        tk.Label(
+            row,
+            text=entry.name,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.TITLE_COLOR,
+            font=admin_theme.SMALL_BOLD_FONT,
+            anchor="w",
+            width=12,
+        ).grid(row=0, column=1, sticky="nw", padx=(0, 10))
+
+        tk.Label(
+            row,
+            text=entry.text,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.TEXT_COLOR,
+            font=admin_theme.BODY_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        ).grid(row=0, column=2, sticky="nsew")
+
+        if index < last_index:
+            tk.Frame(parent, bg=admin_theme.BORDER_COLOR, height=1).pack(
+                fill="x",
+                padx=6,
+                pady=(0, 4),
+            )
+
+
+def _create_dashboard_button_row(
+    parent: tk.Misc,
+    *,
+    left_text: str,
+    left_command: Callable[[], None],
+    right_text: str,
+    right_command: Callable[[], None],
+) -> None:
+    row = tk.Frame(parent, bg=admin_theme.WINDOW_BG)
+    row.pack(fill="x", pady=(0, 10))
+
+    admin_theme.create_button(
+        row,
+        text=left_text,
+        command=left_command,
+        variant="secondary",
+    ).pack(side="left", expand=True, fill="x")
+
+    admin_theme.create_button(
+        row,
+        text=right_text,
+        command=right_command,
+        variant="secondary",
+    ).pack(side="left", expand=True, fill="x", padx=(10, 0))
+
+
+def _open_history_window(root_ref: tk.Tk) -> None:
+    win = tk.Toplevel(root_ref)
+    win.title("コメント履歴")
+
+    wrapper = admin_theme.create_window_shell(win, geometry="760x720")
+    count_var = tk.StringVar(value="表示件数: 0 件")
+    tk.Label(
+        wrapper,
+        textvariable=count_var,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.SECTION_TITLE_FONT,
+        anchor="w",
+        pady=2,
+    ).pack(fill="x")
+
+    timeline_frame, content = admin_theme.create_scrollable_panel(
+        wrapper,
+        background=admin_theme.WINDOW_BG,
+    )
+    timeline_frame.pack(expand=True, fill="both", pady=(8, 0))
+
+    last_signature: list[tuple[tuple[str, str, str, str], ...] | None] = [None]
+
+    def refresh() -> None:
+        if not win.winfo_exists():
+            return
+
+        snapshot = list(state.message_log)
+        signature = build_comment_history_signature(snapshot)
+        if signature != last_signature[0]:
+            rows = build_comment_history_rows(snapshot)
+            count_var.set(f"表示件数: {len(rows)} 件")
+            _render_comment_history_rows(
+                content,
+                rows,
+                empty_message="まだテキストコメント履歴はありません。",
+            )
+            last_signature[0] = signature
+
+        win.after(500, refresh)
+
+    refresh()
+
+
+def _open_transcription_history_window(root_ref: tk.Tk) -> None:
+    if _focus_existing_window(state.transcription_history_window):
+        return
 
     win = tk.Toplevel(root_ref)
     state.transcription_history_window = win
     win.title("文字起こし履歴")
-    win.geometry("760x720")
-    win.configure(bg="#eef3f7")
 
     def on_close() -> None:
         try:
@@ -269,124 +371,74 @@ def _open_transcription_history_window(root_ref: tk.Tk):
 
     win.protocol("WM_DELETE_WINDOW", on_close)
 
-    wrapper = tk.Frame(win, bg="#eef3f7", padx=16, pady=16)
-    wrapper.pack(expand=True, fill="both")
-
-    tk.Label(
+    wrapper = admin_theme.create_window_shell(win, geometry="760x720")
+    _create_window_header(
         wrapper,
-        text="文字起こし状態",
-        bg="#eef3f7",
-        fg="#0f172a",
-        font=("Yu Gothic UI", 16, "bold"),
-        anchor="w",
-    ).pack(fill="x")
-
-    summary = tk.Frame(
-        wrapper,
-        bg="#ffffff",
-        highlightbackground="#d7e2ec",
-        highlightthickness=1,
-        padx=18,
-        pady=16,
+        title="文字起こし履歴",
+        description="文字起こし状態とイベントを、管理UI共通のカードレイアウトで確認できます。",
+        wraplength=680,
     )
-    summary.pack(fill="x", pady=(12, 14))
+
+    _create_section_label(wrapper, "文字起こし状態")
+    summary = admin_theme.create_card(wrapper)
+    summary.pack(fill="x", pady=(10, 14))
 
     session_var = tk.StringVar(value="現在のセッション: なし")
     badge_var = tk.StringVar(value="未接続")
     success_var = tk.StringVar(value="最終成功: -")
     error_var = tk.StringVar(value="最終エラー: -")
 
-    header = tk.Frame(summary, bg="#ffffff")
+    header = tk.Frame(summary, bg=admin_theme.SURFACE_BG)
     header.pack(fill="x")
 
     tk.Label(
         header,
         textvariable=session_var,
-        bg="#ffffff",
-        fg="#0f172a",
-        font=("Yu Gothic UI", 11, "bold"),
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.CARD_TITLE_FONT,
+        anchor="w",
     ).pack(side="left")
 
-    badge_label = tk.Label(
-        header,
-        textvariable=badge_var,
-        bg="#e2e8f0",
-        fg="#475569",
-        padx=12,
-        pady=4,
-        font=("Yu Gothic UI", 10, "bold"),
-    )
+    badge_label = admin_theme.create_badge(header, textvariable=badge_var)
     badge_label.pack(side="right")
 
     tk.Label(
         summary,
         textvariable=success_var,
-        bg="#ffffff",
-        fg="#334155",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
         anchor="w",
         justify="left",
-        font=("Yu Gothic UI", 10),
+        font=admin_theme.SMALL_FONT,
         pady=8,
     ).pack(fill="x")
 
     tk.Label(
         summary,
         textvariable=error_var,
-        bg="#ffffff",
-        fg="#334155",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
         anchor="w",
         justify="left",
         wraplength=660,
-        font=("Yu Gothic UI", 10),
+        font=admin_theme.SMALL_FONT,
     ).pack(fill="x")
 
-    tk.Label(
+    _create_section_label(wrapper, "タイムライン")
+    timeline_frame, content = admin_theme.create_scrollable_panel(
         wrapper,
-        text="タイムライン",
-        bg="#eef3f7",
-        fg="#0f172a",
-        font=("Yu Gothic UI", 13, "bold"),
-        anchor="w",
-    ).pack(fill="x")
-
-    timeline_frame = tk.Frame(wrapper, bg="#eef3f7")
+        background=admin_theme.WINDOW_BG,
+    )
     timeline_frame.pack(expand=True, fill="both", pady=(10, 0))
 
-    canvas = tk.Canvas(
-        timeline_frame,
-        bg="#eef3f7",
-        highlightthickness=0,
-        bd=0,
-    )
-    scrollbar = ttk.Scrollbar(
-        timeline_frame,
-        orient="vertical",
-        command=canvas.yview,
-    )
-    content = tk.Frame(canvas, bg="#eef3f7")
-    content_window = canvas.create_window((0, 0), window=content, anchor="nw")
-
-    canvas.configure(yscrollcommand=scrollbar.set)
-    canvas.pack(side="left", expand=True, fill="both")
-    scrollbar.pack(side="right", fill="y")
-
-    content.bind(
-        "<Configure>",
-        lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-    )
-    canvas.bind(
-        "<Configure>",
-        lambda event: canvas.itemconfigure(content_window, width=event.width),
-    )
-
-    last_signature = [None]
+    last_signature: list[object | None] = [None]
 
     def refresh() -> None:
         if not win.winfo_exists():
             return
 
         status, items, events = state.snapshot_transcription_history()
-        timeline = _build_transcription_timeline(items, events)
         signature = (
             _string_value(status.get("badge")),
             _string_value(status.get("session")),
@@ -418,8 +470,7 @@ def _open_transcription_history_window(root_ref: tk.Tk):
 
             badge = _string_value(status.get("badge")) or "未接続"
             badge_var.set(badge)
-            badge_fg, badge_bg = _transcription_badge_colors(badge)
-            badge_label.configure(bg=badge_bg, fg=badge_fg)
+            admin_theme.update_badge(badge_label, badge)
 
             success_var.set(
                 f"最終成功: {_format_timestamp(status.get('last_success_at'))}"
@@ -435,10 +486,15 @@ def _open_transcription_history_window(root_ref: tk.Tk):
                 error_text = f"最終エラー: {last_error_at}"
             error_var.set(error_text)
 
-            _render_transcription_timeline(
+            empty_message = (
+                "現在セッション未接続のため、状態イベントのみ表示します。"
+                if not _string_value(status.get("session"))
+                else "まだ文字起こし履歴はありません。"
+            )
+            _render_card_list(
                 content,
-                timeline,
-                bool(_string_value(status.get("session"))),
+                build_transcription_timeline(items, events),
+                empty_message=empty_message,
             )
             last_signature[0] = signature
 
@@ -447,27 +503,27 @@ def _open_transcription_history_window(root_ref: tk.Tk):
     refresh()
 
 
+def _normalized_origin_corner(value: object) -> str:
+    if value in ("bottom_left", "bottom_right"):
+        return str(value)
+    raw_value = str(value)
+    if "right" in raw_value:
+        return "bottom_right"
+    return "bottom_left"
+
+
 def _open_experiment_window(
     root_ref: tk.Tk,
     refresh_layout_callback: Callable[[], None],
 ) -> None:
-    existing = state.experiment_window
-    if existing is not None:
-        try:
-            if existing.winfo_exists():
-                existing.lift()
-                existing.focus_force()
-                return
-        except Exception:
-            pass
+    if _focus_existing_window(state.experiment_window):
+        return
 
     win = tk.Toplevel(root_ref)
     state.experiment_window = win
     win.title("実験")
-    win.geometry("460x520")
-    win.attributes("-topmost", True)
 
-    def on_close():
+    def on_close() -> None:
         try:
             win.destroy()
         finally:
@@ -475,20 +531,122 @@ def _open_experiment_window(
 
     win.protocol("WM_DELETE_WINDOW", on_close)
 
-    container = ttk.Frame(win, padding=12)
-    container.pack(expand=True, fill="both")
+    wrapper = admin_theme.create_window_shell(
+        win,
+        geometry="560x760",
+        topmost=True,
+    )
+    _create_window_header(
+        wrapper,
+        title="実験パラメータ",
+        description="スタンプ表示の実験用パラメータを変更できます。変更は次のスタンプから反映されます。",
+        wraplength=500,
+    )
 
-    ttk.Label(
-        container,
-        text="スタンプ表示の実験用パラメータを変更できます（次のスタンプから反映）",
-        wraplength=420,
-        justify="left",
-    ).pack(anchor="w", pady=(0, 12))
+    scroll_frame, content = admin_theme.create_scrollable_panel(
+        wrapper,
+        background=admin_theme.WINDOW_BG,
+    )
+    scroll_frame.pack(expand=True, fill="both", pady=(10, 0))
 
-    # --- Area mode ---
-    area_frame = ttk.LabelFrame(container, text="表示領域")
-    area_frame.pack(fill="x", pady=(0, 10))
     area_var = tk.StringVar(value=getattr(state, "stamp_area_mode", "comment"))
+    initial_corner = _normalized_origin_corner(getattr(state, "stamp_origin_corner", ""))
+    state.stamp_origin_corner = initial_corner
+    corner_var = tk.StringVar(value=initial_corner)
+    speed_min_var = tk.DoubleVar(value=getattr(state, "stamp_speed_min_px_s", 90.0))
+    speed_max_var = tk.DoubleVar(value=getattr(state, "stamp_speed_max_px_s", 200.0))
+    distance_var = tk.DoubleVar(
+        value=getattr(state, "stamp_distance_limit_percent", 0.0)
+    )
+    lifetime_var = tk.DoubleVar(value=getattr(state, "stamp_lifetime_sec", 8.0))
+
+    area_card = _create_titled_card(
+        content,
+        title="表示領域",
+        description="コメント欄のみ表示するか、左75%を使うかを切り替えます。",
+        wraplength=460,
+    )
+
+    corner_card = _create_titled_card(
+        content,
+        title="出現位置",
+        description="左75%モードのときだけ有効です。",
+        wraplength=460,
+    )
+
+    speed_card = _create_titled_card(
+        content,
+        title="移動速度（px/秒）",
+        description="スタンプの移動速度の下限と上限を調整します。",
+        wraplength=460,
+    )
+
+    distance_card = _create_titled_card(
+        content,
+        title="移動距離の上限（%）",
+        description="0 は無制限、100 は画面の高さ分です。",
+        wraplength=460,
+    )
+
+    lifetime_card = _create_titled_card(
+        content,
+        title="強制非表示（秒）",
+        description="スタンプを強制的に非表示にするまでの秒数です。",
+        wraplength=460,
+    )
+
+    actions_card = _create_titled_card(
+        content,
+        title="操作",
+        description="実験値を初期値に戻すか、このウィンドウを閉じます。",
+        wraplength=460,
+    )
+
+    rb_area_comment = admin_theme.create_radiobutton(
+        area_card,
+        text="コメント欄（右25%）",
+        value="comment",
+        variable=area_var,
+        command=lambda: None,
+        background=admin_theme.SURFACE_BG,
+    )
+    rb_area_comment.pack(fill="x", anchor="w", pady=(4, 2))
+
+    rb_area_left = admin_theme.create_radiobutton(
+        area_card,
+        text="左75%",
+        value="left75",
+        variable=area_var,
+        command=lambda: None,
+        background=admin_theme.SURFACE_BG,
+    )
+    rb_area_left.pack(fill="x", anchor="w", pady=2)
+
+    rb_corner_left = admin_theme.create_radiobutton(
+        corner_card,
+        text="左下",
+        value="bottom_left",
+        variable=corner_var,
+        command=lambda: None,
+        background=admin_theme.SURFACE_BG,
+    )
+    rb_corner_left.pack(fill="x", anchor="w", pady=(4, 2))
+
+    rb_corner_right = admin_theme.create_radiobutton(
+        corner_card,
+        text="右下",
+        value="bottom_right",
+        variable=corner_var,
+        command=lambda: None,
+        background=admin_theme.SURFACE_BG,
+    )
+    rb_corner_right.pack(fill="x", anchor="w", pady=2)
+
+    def refresh_corner_controls() -> None:
+        enabled = area_var.get() == "left75"
+        control_state = "normal" if enabled else "disabled"
+        rb_corner_left.configure(state=control_state)
+        rb_corner_right.configure(state=control_state)
 
     def set_area_mode() -> None:
         state.stamp_area_mode = area_var.get()
@@ -498,163 +656,110 @@ def _open_experiment_window(
         except Exception:
             pass
 
-    ttk.Radiobutton(
-        area_frame,
-        text="コメント欄（右25%）",
-        value="comment",
-        variable=area_var,
-        command=set_area_mode,
-    ).pack(anchor="w", padx=8, pady=2)
-    ttk.Radiobutton(
-        area_frame,
-        text="左75%",
-        value="left75",
-        variable=area_var,
-        command=set_area_mode,
-    ).pack(anchor="w", padx=8, pady=2)
-
-    # --- Origin corner ---
-    corner_frame = ttk.LabelFrame(container, text="出現位置（左75%のとき有効）")
-    corner_frame.pack(fill="x", pady=(0, 10))
-    initial_corner = getattr(state, "stamp_origin_corner", "bottom_right")
-    if initial_corner not in ("bottom_left", "bottom_right"):
-        initial_corner = "bottom_right" if "right" in str(initial_corner) else "bottom_left"
-    state.stamp_origin_corner = initial_corner
-    corner_var = tk.StringVar(value=initial_corner)
+    rb_area_comment.configure(command=set_area_mode)
+    rb_area_left.configure(command=set_area_mode)
 
     def set_corner() -> None:
         state.stamp_origin_corner = corner_var.get()
 
-    corner_grid = ttk.Frame(corner_frame)
-    corner_grid.pack(anchor="w", padx=8, pady=6)
-    rb_corner_left = ttk.Radiobutton(
-        corner_grid,
-        text="左下",
-        value="bottom_left",
-        variable=corner_var,
-        command=set_corner,
-    )
-    rb_corner_left.grid(row=0, column=0, sticky="w", padx=(0, 16), pady=2)
-    rb_corner_right = ttk.Radiobutton(
-        corner_grid,
-        text="右下",
-        value="bottom_right",
-        variable=corner_var,
-        command=set_corner,
-    )
-    rb_corner_right.grid(row=0, column=1, sticky="w", pady=2)
-
-    def refresh_corner_controls() -> None:
-        enabled = area_var.get() == "left75"
-        state_str = "normal" if enabled else "disabled"
-        rb_corner_left.configure(state=state_str)
-        rb_corner_right.configure(state=state_str)
-
+    rb_corner_left.configure(command=set_corner)
+    rb_corner_right.configure(command=set_corner)
     refresh_corner_controls()
 
-    # --- Speed range ---
-    speed_frame = ttk.LabelFrame(container, text="移動速度（px/秒）")
-    speed_frame.pack(fill="x", pady=(0, 10))
-    speed_min_var = tk.DoubleVar(value=getattr(state, "stamp_speed_min_px_s", 90.0))
-    speed_max_var = tk.DoubleVar(value=getattr(state, "stamp_speed_max_px_s", 200.0))
+    tk.Label(
+        speed_card,
+        text="最小",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(4, 0))
 
     def set_speed_min(value: str) -> None:
         try:
-            v = float(value)
-        except Exception:
+            speed_value = float(value)
+        except ValueError:
             return
-        state.stamp_speed_min_px_s = v
-        if v > float(speed_max_var.get()):
-            speed_max_var.set(v)
-            state.stamp_speed_max_px_s = v
+        state.stamp_speed_min_px_s = speed_value
+        if speed_value > float(speed_max_var.get()):
+            speed_max_var.set(speed_value)
+            state.stamp_speed_max_px_s = speed_value
+
+    admin_theme.create_scale(
+        speed_card,
+        variable=speed_min_var,
+        from_=10,
+        to=600,
+        resolution=1,
+        command=set_speed_min,
+        background=admin_theme.SURFACE_BG,
+    ).pack(fill="x", pady=(2, 8))
+
+    tk.Label(
+        speed_card,
+        text="最大",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x")
 
     def set_speed_max(value: str) -> None:
         try:
-            v = float(value)
-        except Exception:
+            speed_value = float(value)
+        except ValueError:
             return
-        state.stamp_speed_max_px_s = v
-        if v < float(speed_min_var.get()):
-            speed_min_var.set(v)
-            state.stamp_speed_min_px_s = v
+        state.stamp_speed_max_px_s = speed_value
+        if speed_value < float(speed_min_var.get()):
+            speed_min_var.set(speed_value)
+            state.stamp_speed_min_px_s = speed_value
 
-    tk.Label(speed_frame, text="最小").pack(anchor="w", padx=8)
-    tk.Scale(
-        speed_frame,
-        from_=10,
-        to=600,
-        orient="horizontal",
-        resolution=1,
-        showvalue=True,
-        variable=speed_min_var,
-        command=set_speed_min,
-    ).pack(fill="x", padx=8, pady=(0, 6))
-    tk.Label(speed_frame, text="最大").pack(anchor="w", padx=8)
-    tk.Scale(
-        speed_frame,
-        from_=10,
-        to=600,
-        orient="horizontal",
-        resolution=1,
-        showvalue=True,
+    admin_theme.create_scale(
+        speed_card,
         variable=speed_max_var,
+        from_=10,
+        to=600,
+        resolution=1,
         command=set_speed_max,
-    ).pack(fill="x", padx=8, pady=(0, 6))
-
-    # --- Distance limit ---
-    distance_frame = ttk.LabelFrame(container, text="移動距離の上限（%）")
-    distance_frame.pack(fill="x", pady=(0, 10))
-    distance_var = tk.DoubleVar(
-        value=getattr(state, "stamp_distance_limit_percent", 0.0)
-    )
+        background=admin_theme.SURFACE_BG,
+    ).pack(fill="x", pady=(2, 0))
 
     def set_distance(value: str) -> None:
         try:
-            v = float(value)
-        except Exception:
+            distance_value = float(value)
+        except ValueError:
             return
-        state.stamp_distance_limit_percent = max(0.0, min(100.0, v))
+        state.stamp_distance_limit_percent = max(0.0, min(100.0, distance_value))
 
-    ttk.Label(distance_frame, text="0 = 無制限 / 100 = 画面の高さ分").pack(
-        anchor="w", padx=8
-    )
-    tk.Scale(
-        distance_frame,
+    admin_theme.create_scale(
+        distance_card,
+        variable=distance_var,
         from_=0,
         to=100,
-        orient="horizontal",
         resolution=1,
-        showvalue=True,
-        variable=distance_var,
         command=set_distance,
-    ).pack(fill="x", padx=8, pady=(0, 6))
-
-    # --- Lifetime ---
-    lifetime_frame = ttk.LabelFrame(container, text="強制非表示（秒）")
-    lifetime_frame.pack(fill="x", pady=(0, 10))
-    lifetime_var = tk.DoubleVar(value=getattr(state, "stamp_lifetime_sec", 8.0))
+        background=admin_theme.SURFACE_BG,
+    ).pack(fill="x", pady=(4, 0))
 
     def set_lifetime(value: str) -> None:
         try:
-            v = float(value)
-        except Exception:
+            lifetime_value = float(value)
+        except ValueError:
             return
-        state.stamp_lifetime_sec = max(0.1, v)
+        state.stamp_lifetime_sec = max(0.1, lifetime_value)
 
-    tk.Scale(
-        lifetime_frame,
+    admin_theme.create_scale(
+        lifetime_card,
+        variable=lifetime_var,
         from_=0.5,
         to=60.0,
-        orient="horizontal",
         resolution=0.5,
-        showvalue=True,
-        variable=lifetime_var,
         command=set_lifetime,
-    ).pack(fill="x", padx=8, pady=(6, 6))
+        background=admin_theme.SURFACE_BG,
+    ).pack(fill="x", pady=(4, 0))
 
-    # --- Actions ---
-    actions = ttk.Frame(container)
-    actions.pack(fill="x", pady=(8, 0))
+    actions = tk.Frame(actions_card, bg=admin_theme.SURFACE_BG)
+    actions.pack(fill="x", pady=(4, 0))
 
     def reset_defaults() -> None:
         state.reset_stamp_experiment_settings()
@@ -665,11 +770,20 @@ def _open_experiment_window(
         distance_var.set(state.stamp_distance_limit_percent)
         lifetime_var.set(state.stamp_lifetime_sec)
         set_area_mode()
+        set_corner()
 
-    ttk.Button(actions, text="デフォルトに戻す", command=reset_defaults).pack(
-        side="left"
-    )
-    ttk.Button(actions, text="閉じる", command=on_close).pack(side="right")
+    admin_theme.create_button(
+        actions,
+        text="デフォルトに戻す",
+        command=reset_defaults,
+        variant="secondary",
+    ).pack(side="left")
+    admin_theme.create_button(
+        actions,
+        text="閉じる",
+        command=on_close,
+        variant="primary",
+    ).pack(side="right")
 
 
 def create_menu_window(
@@ -679,32 +793,81 @@ def create_menu_window(
 ) -> None:
     menu = tk.Toplevel(root_ref)
     menu.title("コントローラーメニュー")
-    menu.geometry("350x470")
-    menu.attributes("-topmost", True)
 
-    state.menu_status_var = tk.StringVar(value="未接続")
-    state.menu_current_session_var = tk.StringVar(value="現在のセッション: なし")
-    state.menu_session_var = tk.StringVar(value="default")
+    wrapper = admin_theme.create_window_shell(
+        menu,
+        geometry="430x420",
+        topmost=True,
+    )
 
-    tk.Label(menu, textvariable=state.menu_status_var).pack(pady=(10, 5))
-    tk.Label(menu, textvariable=state.menu_current_session_var).pack(pady=(0, 10))
+    status_var = tk.StringVar(value="未接続")
+    current_session_var = tk.StringVar(value="現在のセッション: なし")
+    session_var = tk.StringVar(value="default")
+    state.menu_status_var = status_var
+    state.menu_current_session_var = current_session_var
+    state.menu_session_var = session_var
 
-    frame = tk.Frame(menu)
-    frame.pack(pady=5, fill="x", padx=10)
-    tk.Label(frame, text="セッションID").grid(row=0, column=0, sticky="w")
-    entry = tk.Entry(frame, textvariable=state.menu_session_var, width=28)
-    entry.grid(row=1, column=0, padx=(0, 8), pady=(2, 0), sticky="w")
-    tk.Button(
-        frame,
+    control_row = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    control_row.pack(fill="x")
+
+    status_badge = admin_theme.create_badge(control_row, textvariable=status_var)
+    status_badge.pack(side="left", padx=(0, 10))
+
+    def refresh_status_badge(*_args: str) -> None:
+        try:
+            if status_badge.winfo_exists():
+                admin_theme.update_badge(status_badge, status_var.get())
+        except tk.TclError:
+            return
+
+    status_var.trace_add("write", refresh_status_badge)
+    refresh_status_badge()
+
+    admin_theme.create_entry(control_row, textvariable=session_var).pack(
+        side="left",
+        expand=True,
+        fill="x",
+    )
+
+    admin_theme.create_button(
+        control_row,
         text="接続",
-        command=lambda: connect_session(state.menu_session_var.get().strip()),
-    ).grid(row=1, column=1, sticky="e")
+        command=lambda: connect_session(session_var.get().strip()),
+        variant="primary",
+    ).pack(side="left", padx=(10, 0))
 
-    def export_dialog(fmt: str):
+    buttons = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    buttons.pack(fill="both", expand=True, pady=(16, 0))
+
+    _create_dashboard_button_row(
+        buttons,
+        left_text="ディスプレイ切替",
+        left_command=switch_display_callback,
+        right_text="実験",
+        right_command=lambda: _open_experiment_window(root_ref, refresh_layout_callback),
+    )
+    _create_dashboard_button_row(
+        buttons,
+        left_text="コメント履歴",
+        left_command=lambda: _open_history_window(root_ref),
+        right_text="文字起こし履歴",
+        right_command=lambda: _open_transcription_history_window(root_ref),
+    )
+
+    def export_dialog(fmt: str) -> None:
         if not state.message_log:
             messagebox.showinfo("保存", "データがありません")
             return
-        df = pd.DataFrame(state.message_log).rename(
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            messagebox.showerror(
+                "保存エラー",
+                "履歴保存には pandas のインストールが必要です。",
+            )
+            return
+
+        data_frame = pd.DataFrame(state.message_log).rename(
             columns={
                 "real_name": "本名",
                 "name": "名前",
@@ -713,51 +876,54 @@ def create_menu_window(
             }
         )
         if fmt == "xlsx":
+            try:
+                import openpyxl  # noqa: F401
+            except ModuleNotFoundError:
+                messagebox.showerror(
+                    "保存エラー",
+                    "Excel 保存には openpyxl のインストールが必要です。",
+                )
+                return
             path = filedialog.asksaveasfilename(
-                defaultextension=".xlsx", filetypes=[("Excelファイル", "*.xlsx")]
+                defaultextension=".xlsx",
+                filetypes=[("Excelファイル", "*.xlsx")],
+                initialfile=_default_export_filename(".xlsx"),
             )
             if not path:
                 return
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="コメント履歴")
-            with open(path, "wb") as f:
-                f.write(out.getvalue())
+                data_frame.to_excel(writer, index=False, sheet_name="コメント履歴")
+            with open(path, "wb") as file_obj:
+                file_obj.write(out.getvalue())
         else:
             path = filedialog.asksaveasfilename(
-                defaultextension=".csv", filetypes=[("CSVファイル", "*.csv")]
+                defaultextension=".csv",
+                filetypes=[("CSVファイル", "*.csv")],
+                initialfile=_default_export_filename(".csv"),
             )
             if not path:
                 return
-            df.to_csv(path, index=False, encoding="utf-8-sig")
+            data_frame.to_csv(path, index=False, encoding="utf-8-sig")
         messagebox.showinfo("保存", "保存しました")
 
-    def confirm_exit():
+    _create_dashboard_button_row(
+        buttons,
+        left_text="CSV で保存",
+        left_command=lambda: export_dialog("csv"),
+        right_text="Excel で保存",
+        right_command=lambda: export_dialog("xlsx"),
+    )
+
+    def confirm_exit() -> None:
         if messagebox.askokcancel("終了", "アプリを終了しますか？"):
             disconnect_session(show_status=False)
             stop_transcription_service()
             root_ref.destroy()
 
-    tk.Button(menu, text="ディスプレイ切替", command=switch_display_callback).pack(
-        pady=8
-    )
-    tk.Button(
-        menu,
-        text="実験",
-        command=lambda: _open_experiment_window(root_ref, refresh_layout_callback),
-    ).pack(pady=5)
-    tk.Button(
-        menu, text="コメント履歴", command=lambda: _open_history_window(root_ref)
-    ).pack(pady=5)
-    tk.Button(
-        menu,
-        text="文字起こし履歴",
-        command=lambda: _open_transcription_history_window(root_ref),
-    ).pack(pady=5)
-    tk.Button(menu, text="CSV で保存", command=lambda: export_dialog("csv")).pack(
-        pady=5
-    )
-    tk.Button(menu, text="Excel で保存", command=lambda: export_dialog("xlsx")).pack(
-        pady=5
-    )
-    tk.Button(menu, text="アプリ終了", command=confirm_exit).pack(pady=12)
+    admin_theme.create_button(
+        buttons,
+        text="アプリ終了",
+        command=confirm_exit,
+        variant="danger",
+    ).pack(fill="x", pady=(2, 0))
