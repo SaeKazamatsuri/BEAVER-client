@@ -7,16 +7,6 @@ import threading
 from urllib.parse import urlsplit
 from tkinter import messagebox
 
-import app_state as state
-from backend_api import (
-    BackendApiError,
-    build_ws_url,
-    fetch_bootstrap,
-    fetch_transcriptions,
-    parse_comment_event,
-)
-from constants import BACKEND_HTTP_TIMEOUT_SEC, BACKEND_WS_ORIGIN
-from overlay import should_drop_on_arrival
 from wsproto import WSConnection
 from wsproto.connection import ConnectionType
 from wsproto.events import (
@@ -27,6 +17,17 @@ from wsproto.events import (
     RejectData,
     Request,
     TextMessage,
+)
+
+from config.constants import BACKEND_HTTP_TIMEOUT_SEC, BACKEND_WS_ORIGIN
+from state import app_state as state
+from ui.overlay import should_drop_on_arrival
+from services.backend_api import (
+    BackendApiError,
+    build_ws_url,
+    fetch_bootstrap,
+    fetch_transcriptions,
+    parse_comment_event,
 )
 
 _connection_lock = threading.Lock()

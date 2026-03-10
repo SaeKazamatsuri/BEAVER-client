@@ -12,8 +12,7 @@ from typing import Tuple
 import requests
 import tkinter as tk
 
-import app_state as state
-from constants import (
+from config.constants import (
     BACKEND_BASE_URL,
     OVERLAY_TRANSPARENT_COLOR,
     STAMP_BALLOON_LIFETIME_SEC,
@@ -29,6 +28,7 @@ from constants import (
     STAMP_ID_CACHE_SIZE,
     STAMP_RECENT_WINDOW_SEC,
 )
+from state import app_state as state
 
 
 def coerce_ts_seconds(entry: dict) -> float | None:

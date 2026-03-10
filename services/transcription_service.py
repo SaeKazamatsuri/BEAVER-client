@@ -7,12 +7,12 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from backend_api import post_transcription
-from constants import (
+from config.constants import (
     TRANSCRIPTION_CSV_PATH,
     TRANSCRIPTION_EXECUTABLE_PATH,
     TRANSCRIPTION_WORK_DIR,
 )
+from services.backend_api import post_transcription
 
 StatusCallback = Callable[[dict[str, object], dict[str, object] | None], None]
 ItemCallback = Callable[[dict[str, object]], None]

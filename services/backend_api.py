@@ -6,7 +6,11 @@ from urllib.parse import quote
 
 import requests
 
-from constants import BACKEND_BASE_URL, BACKEND_HTTP_TIMEOUT_SEC, BACKEND_WS_BASE_URL
+from config.constants import (
+    BACKEND_BASE_URL,
+    BACKEND_HTTP_TIMEOUT_SEC,
+    BACKEND_WS_BASE_URL,
+)
 
 
 class BackendApiError(RuntimeError):

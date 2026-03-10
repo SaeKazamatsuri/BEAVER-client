@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from comment_ui import SOFT_WRAP_MARKER, comment_entry_from_message, insert_soft_wraps
+from ui.comment_ui import (
+    SOFT_WRAP_MARKER,
+    comment_entry_from_message,
+    insert_soft_wraps,
+)
 
 
 class InsertSoftWrapsTests(unittest.TestCase):

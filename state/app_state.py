@@ -8,12 +8,12 @@ from typing import Callable
 
 import tkinter as tk
 
-from comment_ui import CommentEntry
-from constants import (
+from config.constants import (
     STAMP_BALLOON_LIFETIME_SEC,
     STAMP_BALLOON_MAX_SPEED_PX,
     STAMP_BALLOON_MIN_SPEED_PX,
 )
+from ui.comment_ui import CommentEntry
 
 message_queue: queue.Queue[dict[str, object]] = queue.Queue()
 message_log: list[dict[str, object]] = []

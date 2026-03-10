@@ -11,9 +11,9 @@ import win32con
 import win32gui
 from tkinter import filedialog, messagebox
 
-import app_state as state
-from events import connect_session, disconnect_session
-from transcription_service import stop_transcription_service
+from services.events import connect_session, disconnect_session
+from services.transcription_service import stop_transcription_service
+from state import app_state as state
 
 
 def set_always_on_top(hwnd):
