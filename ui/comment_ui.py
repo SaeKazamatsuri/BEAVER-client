@@ -16,11 +16,10 @@ NAME_TAG_BG = "#ffef8a"
 NAME_TAG_FG = "#0b1f33"
 TIME_TEXT_FG = "#6b7a90"
 BODY_TEXT_FG = "#0b1f33"
-ACCENT_DOT_FILL = "#d6eef7"
 
-NAME_FONT = ("Yu Gothic UI", 12, "bold")
-TIME_FONT = ("Yu Gothic UI", 10)
-BODY_FONT = ("Yu Gothic UI", 22, "bold")
+NAME_FONT = ("Yu Gothic UI", -16, "bold")
+TIME_FONT = ("Yu Gothic UI", -16)
+BODY_FONT = ("Yu Gothic UI", -28, "bold")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,37 +123,55 @@ class CommentCardCanvas(tk.Canvas):
 
         self.delete("all")
 
-        card_left = 8
-        card_top = 20
-        card_right = max(card_left + 220, width - 8)
-        card_inner_left = card_left + 26
-        card_inner_right = card_right - 26
-        label_x = card_left + 34
-        label_y = 10
-        time_y = card_top + 30
-        body_y = card_top + 58
+        card_left = 4
+        card_top = 4
+        shadow_offset_x = 6
+        shadow_offset_y = 6
+        card_right = max(card_left + 220, width - card_left - shadow_offset_x)
+        card_inner_left = card_left + 18
+        card_inner_right = card_right - 18
+        header_y = card_top + 12
+        label_x = card_inner_left
         body_width = max(120, card_inner_right - card_inner_left)
         body_text = insert_soft_wraps(self._entry.text)
 
-        label_bbox, time_bbox, body_bbox = self._measure_text_bboxes(
-            label_x=label_x,
-            label_y=label_y,
-            time_x=card_inner_right,
-            time_y=time_y,
+        time_bbox = self._measure_text_bbox(
+            x=card_inner_right,
+            y=header_y,
+            anchor="ne",
+            fill=TIME_TEXT_FG,
+            font=TIME_FONT,
+            text=self._entry.time,
+            fallback=(card_inner_right - 80, header_y, card_inner_right, header_y + 24),
+        )
+        label_width = max(80, time_bbox[0] - label_x - 16)
+        label_bbox = self._measure_text_bbox(
+            x=label_x,
+            y=header_y,
+            anchor="nw",
+            fill=NAME_TAG_FG,
+            font=NAME_FONT,
+            text=self._entry.name,
+            width=label_width,
+            fallback=(label_x, header_y, label_x + label_width, header_y + 24),
+        )
+        label_tag_bottom = label_bbox[3] + 4
+        body_y = max(label_tag_bottom, time_bbox[3]) + 10
+        body_bbox = self._measure_body_bbox(
             body_x=card_inner_left,
             body_y=body_y,
             body_width=body_width,
             body_text=body_text,
         )
 
-        card_bottom = max(card_top + 118, body_bbox[3] + 24, time_bbox[3] + 24)
-        height = card_bottom + 20
+        card_bottom = max(card_top + 94, body_bbox[3] + 12)
+        height = card_bottom + shadow_offset_y + 6
 
         shadow_id = self._create_rounded_rectangle(
-            card_left + 8,
-            card_top + 12,
-            card_right + 8,
-            card_bottom + 12,
+            card_left + shadow_offset_x,
+            card_top + shadow_offset_y,
+            card_right + shadow_offset_x,
+            card_bottom + shadow_offset_y,
             radius=28,
             fill=CARD_SHADOW,
             outline="",
@@ -170,24 +187,11 @@ class CommentCardCanvas(tk.Canvas):
             width=3,
         )
 
-        dot_y = card_top + 28
-        dot_x = card_right - 66
-        for index in range(3):
-            offset = index * 14
-            self.create_oval(
-                dot_x + offset,
-                dot_y,
-                dot_x + offset + 8,
-                dot_y + 8,
-                fill=ACCENT_DOT_FILL,
-                outline="",
-            )
-
         self._create_rounded_rectangle(
-            label_bbox[0] - 14,
-            label_bbox[1] - 8,
-            label_bbox[2] + 14,
-            label_bbox[3] + 8,
+            label_bbox[0] - 10,
+            label_bbox[1] - 4,
+            label_bbox[2] + 10,
+            label_bbox[3] + 4,
             radius=18,
             fill=NAME_TAG_BG,
             outline=CARD_BORDER,
@@ -196,15 +200,16 @@ class CommentCardCanvas(tk.Canvas):
 
         self.create_text(
             label_x,
-            label_y,
-            anchor="w",
+            header_y,
+            anchor="nw",
             fill=NAME_TAG_FG,
             font=NAME_FONT,
             text=self._entry.name,
+            width=label_width,
         )
         self.create_text(
             card_inner_right,
-            time_y,
+            header_y,
             anchor="ne",
             fill=TIME_TEXT_FG,
             font=TIME_FONT,
@@ -226,61 +231,50 @@ class CommentCardCanvas(tk.Canvas):
             self._last_height = height
             self.configure(height=height)
 
-    def _measure_text_bboxes(
+    def _measure_text_bbox(
         self,
         *,
-        label_x: int,
-        label_y: int,
-        time_x: int,
-        time_y: int,
+        x: int,
+        y: int,
+        anchor: str,
+        fill: str,
+        font: tuple[object, ...],
+        text: str,
+        fallback: tuple[int, int, int, int],
+        width: int | None = None,
+    ) -> tuple[int, int, int, int]:
+        kwargs: dict[str, object] = {
+            "anchor": anchor,
+            "fill": fill,
+            "font": font,
+            "text": text,
+        }
+        if width is not None:
+            kwargs["justify"] = "left"
+            kwargs["width"] = width
+        item_id = self.create_text(x, y, **kwargs)
+        bbox = self._bbox_or_default(item_id, fallback)
+        self.delete(item_id)
+        return bbox
+
+    def _measure_body_bbox(
+        self,
+        *,
         body_x: int,
         body_y: int,
         body_width: int,
         body_text: str,
-    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], tuple[int, int, int, int]]:
-        temp_label = self.create_text(
-            label_x,
-            label_y,
-            anchor="w",
-            fill=NAME_TAG_FG,
-            font=NAME_FONT,
-            text=self._entry.name,
-        )
-        temp_time = self.create_text(
-            time_x,
-            time_y,
-            anchor="ne",
-            fill=TIME_TEXT_FG,
-            font=TIME_FONT,
-            text=self._entry.time,
-        )
-        temp_body = self.create_text(
-            body_x,
-            body_y,
+    ) -> tuple[int, int, int, int]:
+        return self._measure_text_bbox(
+            x=body_x,
+            y=body_y,
             anchor="nw",
             fill=BODY_TEXT_FG,
             font=BODY_FONT,
-            justify="left",
             text=body_text,
             width=body_width,
+            fallback=(body_x, body_y, body_x + body_width, body_y + 40),
         )
-
-        label_bbox = self._bbox_or_default(
-            temp_label,
-            (label_x, label_y, label_x + 80, label_y + 24),
-        )
-        time_bbox = self._bbox_or_default(
-            temp_time,
-            (time_x - 80, time_y - 16, time_x, time_y + 4),
-        )
-        body_bbox = self._bbox_or_default(
-            temp_body,
-            (body_x, body_y, body_x + body_width, body_y + 40),
-        )
-        self.delete(temp_label)
-        self.delete(temp_time)
-        self.delete(temp_body)
-        return label_bbox, time_bbox, body_bbox
 
     def _bbox_or_default(
         self,
@@ -356,7 +350,7 @@ class CommentListView(tk.Frame):
         self._window_id = self._canvas.create_window((0, 0), window=self._content, anchor="nw")
 
         self._column = tk.Frame(self._content, background=COMMENT_COLUMN_BG)
-        self._column.pack(fill="both", expand=True, padx=20, pady=(28, 40))
+        self._column.pack(fill="both", expand=True, padx=8, pady=(10, 16))
 
         self._content.bind("<Configure>", self._on_content_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
@@ -387,9 +381,9 @@ class CommentListView(tk.Frame):
         card.bind("<Button-4>", self._on_mousewheel_linux)
         card.bind("<Button-5>", self._on_mousewheel_linux)
         if self._cards:
-            card.pack(fill="x", pady=(0, 16), before=self._cards[0])
+            card.pack(fill="x", pady=(0, 5), before=self._cards[0])
         else:
-            card.pack(fill="x", pady=(0, 16))
+            card.pack(fill="x", pady=(0, 5))
         self._cards.insert(0, card)
         self.after_idle(self._refresh_scrollregion)
         self.after_idle(lambda: self._canvas.yview_moveto(0.0))
