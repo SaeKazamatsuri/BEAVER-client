@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ui.comment_ui import (
+    _card_total_height,
     SOFT_WRAP_MARKER,
     comment_entry_from_message,
     insert_soft_wraps,
@@ -21,6 +22,25 @@ class InsertSoftWrapsTests(unittest.TestCase):
             + SOFT_WRAP_MARKER
             + "1234567890qrstuv",
         )
+
+
+class CardHeightTests(unittest.TestCase):
+    def test_card_total_height_is_relative_to_top(self) -> None:
+        first = _card_total_height(
+            card_top=10,
+            card_bottom=104,
+            shadow_offset_y=6,
+            bottom_padding=6,
+        )
+        second = _card_total_height(
+            card_top=200,
+            card_bottom=294,
+            shadow_offset_y=6,
+            bottom_padding=6,
+        )
+
+        self.assertEqual(first, 106)
+        self.assertEqual(second, 106)
 
 
 class CommentEntryFromMessageTests(unittest.TestCase):

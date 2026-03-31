@@ -93,6 +93,252 @@ def _required_string(value: object) -> str | None:
     return None
 
 
+def _bbox_or_default(
+    canvas: tk.Canvas,
+    item_id: int,
+    default: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    bbox = canvas.bbox(item_id)
+    if bbox is None:
+        return default
+    return bbox
+
+
+def _create_rounded_rectangle(
+    canvas: tk.Canvas,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    radius: int,
+    tags: tuple[str, ...],
+    **kwargs: object,
+) -> int:
+    points = [
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+    return int(
+        canvas.create_polygon(
+            points,
+            smooth=True,
+            splinesteps=24,
+            tags=tags,
+            **kwargs,
+        )
+    )
+
+
+def _measure_text_bbox(
+    canvas: tk.Canvas,
+    *,
+    x: int,
+    y: int,
+    anchor: str,
+    fill: str,
+    font: tuple[object, ...],
+    text: str,
+    fallback: tuple[int, int, int, int],
+    width: int | None = None,
+) -> tuple[int, int, int, int]:
+    kwargs: dict[str, object] = {
+        "anchor": anchor,
+        "fill": fill,
+        "font": font,
+        "text": text,
+    }
+    if width is not None:
+        kwargs["justify"] = "left"
+        kwargs["width"] = width
+    item_id = canvas.create_text(x, y, **kwargs)
+    bbox = _bbox_or_default(canvas, item_id, fallback)
+    canvas.delete(item_id)
+    return bbox
+
+
+def _measure_body_bbox(
+    canvas: tk.Canvas,
+    *,
+    body_x: int,
+    body_y: int,
+    body_width: int,
+    body_text: str,
+) -> tuple[int, int, int, int]:
+    return _measure_text_bbox(
+        canvas,
+        x=body_x,
+        y=body_y,
+        anchor="nw",
+        fill=BODY_TEXT_FG,
+        font=BODY_FONT,
+        text=body_text,
+        width=body_width,
+        fallback=(body_x, body_y, body_x + body_width, body_y + 40),
+    )
+
+
+def _card_total_height(
+    *,
+    card_top: int,
+    card_bottom: int,
+    shadow_offset_y: int,
+    bottom_padding: int,
+) -> int:
+    return (card_bottom - card_top) + shadow_offset_y + bottom_padding
+
+
+def _draw_comment_card(
+    canvas: tk.Canvas,
+    entry: CommentEntry,
+    *,
+    card_left: int,
+    card_top: int,
+    card_right: int,
+    tags: tuple[str, ...],
+) -> int:
+    shadow_offset_x = 6
+    shadow_offset_y = 6
+    card_inner_left = card_left + 18
+    card_inner_right = card_right - 18
+    header_y = card_top + 12
+    label_x = card_inner_left
+    body_width = max(120, card_inner_right - card_inner_left)
+    body_text = insert_soft_wraps(entry.text)
+
+    time_bbox = _measure_text_bbox(
+        canvas,
+        x=card_inner_right,
+        y=header_y,
+        anchor="ne",
+        fill=TIME_TEXT_FG,
+        font=TIME_FONT,
+        text=entry.time,
+        fallback=(card_inner_right - 80, header_y, card_inner_right, header_y + 24),
+    )
+    label_width = max(80, time_bbox[0] - label_x - 16)
+    label_bbox = _measure_text_bbox(
+        canvas,
+        x=label_x,
+        y=header_y,
+        anchor="nw",
+        fill=NAME_TAG_FG,
+        font=NAME_FONT,
+        text=entry.name,
+        width=label_width,
+        fallback=(label_x, header_y, label_x + label_width, header_y + 24),
+    )
+    label_tag_bottom = label_bbox[3] + 4
+    body_y = max(label_tag_bottom, time_bbox[3]) + 10
+    body_bbox = _measure_body_bbox(
+        canvas,
+        body_x=card_inner_left,
+        body_y=body_y,
+        body_width=body_width,
+        body_text=body_text,
+    )
+
+    card_bottom = max(card_top + 94, body_bbox[3] + 12)
+    height = _card_total_height(
+        card_top=card_top,
+        card_bottom=card_bottom,
+        shadow_offset_y=shadow_offset_y,
+        bottom_padding=6,
+    )
+
+    shadow_id = _create_rounded_rectangle(
+        canvas,
+        card_left + shadow_offset_x,
+        card_top + shadow_offset_y,
+        card_right + shadow_offset_x,
+        card_bottom + shadow_offset_y,
+        radius=28,
+        fill=CARD_SHADOW,
+        outline="",
+        tags=tags,
+    )
+    _create_rounded_rectangle(
+        canvas,
+        card_left,
+        card_top,
+        card_right,
+        card_bottom,
+        radius=28,
+        fill=CARD_BG,
+        outline=CARD_BORDER,
+        width=3,
+        tags=tags,
+    )
+    _create_rounded_rectangle(
+        canvas,
+        label_bbox[0] - 10,
+        label_bbox[1] - 4,
+        label_bbox[2] + 10,
+        label_bbox[3] + 4,
+        radius=18,
+        fill=NAME_TAG_BG,
+        outline=CARD_BORDER,
+        width=2,
+        tags=tags,
+    )
+
+    canvas.create_text(
+        label_x,
+        header_y,
+        anchor="nw",
+        fill=NAME_TAG_FG,
+        font=NAME_FONT,
+        text=entry.name,
+        width=label_width,
+        tags=tags,
+    )
+    canvas.create_text(
+        card_inner_right,
+        header_y,
+        anchor="ne",
+        fill=TIME_TEXT_FG,
+        font=TIME_FONT,
+        text=entry.time,
+        tags=tags,
+    )
+    canvas.create_text(
+        card_inner_left,
+        body_y,
+        anchor="nw",
+        fill=BODY_TEXT_FG,
+        font=BODY_FONT,
+        justify="left",
+        text=body_text,
+        width=body_width,
+        tags=tags,
+    )
+
+    canvas.tag_lower(shadow_id)
+    return height
+
+
 class CommentCardCanvas(tk.Canvas):
     def __init__(self, master: tk.Misc, entry: CommentEntry) -> None:
         super().__init__(
@@ -122,220 +368,27 @@ class CommentCardCanvas(tk.Canvas):
             return
 
         self.delete("all")
-
         card_left = 4
         card_top = 4
-        shadow_offset_x = 6
-        shadow_offset_y = 6
-        card_right = max(card_left + 220, width - card_left - shadow_offset_x)
-        card_inner_left = card_left + 18
-        card_inner_right = card_right - 18
-        header_y = card_top + 12
-        label_x = card_inner_left
-        body_width = max(120, card_inner_right - card_inner_left)
-        body_text = insert_soft_wraps(self._entry.text)
-
-        time_bbox = self._measure_text_bbox(
-            x=card_inner_right,
-            y=header_y,
-            anchor="ne",
-            fill=TIME_TEXT_FG,
-            font=TIME_FONT,
-            text=self._entry.time,
-            fallback=(card_inner_right - 80, header_y, card_inner_right, header_y + 24),
+        card_right = max(card_left + 220, width - card_left - 6)
+        height = _draw_comment_card(
+            self,
+            self._entry,
+            card_left=card_left,
+            card_top=card_top,
+            card_right=card_right,
+            tags=(),
         )
-        label_width = max(80, time_bbox[0] - label_x - 16)
-        label_bbox = self._measure_text_bbox(
-            x=label_x,
-            y=header_y,
-            anchor="nw",
-            fill=NAME_TAG_FG,
-            font=NAME_FONT,
-            text=self._entry.name,
-            width=label_width,
-            fallback=(label_x, header_y, label_x + label_width, header_y + 24),
-        )
-        label_tag_bottom = label_bbox[3] + 4
-        body_y = max(label_tag_bottom, time_bbox[3]) + 10
-        body_bbox = self._measure_body_bbox(
-            body_x=card_inner_left,
-            body_y=body_y,
-            body_width=body_width,
-            body_text=body_text,
-        )
-
-        card_bottom = max(card_top + 94, body_bbox[3] + 12)
-        height = card_bottom + shadow_offset_y + 6
-
-        shadow_id = self._create_rounded_rectangle(
-            card_left + shadow_offset_x,
-            card_top + shadow_offset_y,
-            card_right + shadow_offset_x,
-            card_bottom + shadow_offset_y,
-            radius=28,
-            fill=CARD_SHADOW,
-            outline="",
-        )
-        self._create_rounded_rectangle(
-            card_left,
-            card_top,
-            card_right,
-            card_bottom,
-            radius=28,
-            fill=CARD_BG,
-            outline=CARD_BORDER,
-            width=3,
-        )
-
-        self._create_rounded_rectangle(
-            label_bbox[0] - 10,
-            label_bbox[1] - 4,
-            label_bbox[2] + 10,
-            label_bbox[3] + 4,
-            radius=18,
-            fill=NAME_TAG_BG,
-            outline=CARD_BORDER,
-            width=2,
-        )
-
-        self.create_text(
-            label_x,
-            header_y,
-            anchor="nw",
-            fill=NAME_TAG_FG,
-            font=NAME_FONT,
-            text=self._entry.name,
-            width=label_width,
-        )
-        self.create_text(
-            card_inner_right,
-            header_y,
-            anchor="ne",
-            fill=TIME_TEXT_FG,
-            font=TIME_FONT,
-            text=self._entry.time,
-        )
-        self.create_text(
-            card_inner_left,
-            body_y,
-            anchor="nw",
-            fill=BODY_TEXT_FG,
-            font=BODY_FONT,
-            justify="left",
-            text=body_text,
-            width=body_width,
-        )
-
-        self.tag_lower(shadow_id)
         if height != self._last_height:
             self._last_height = height
             self.configure(height=height)
-
-    def _measure_text_bbox(
-        self,
-        *,
-        x: int,
-        y: int,
-        anchor: str,
-        fill: str,
-        font: tuple[object, ...],
-        text: str,
-        fallback: tuple[int, int, int, int],
-        width: int | None = None,
-    ) -> tuple[int, int, int, int]:
-        kwargs: dict[str, object] = {
-            "anchor": anchor,
-            "fill": fill,
-            "font": font,
-            "text": text,
-        }
-        if width is not None:
-            kwargs["justify"] = "left"
-            kwargs["width"] = width
-        item_id = self.create_text(x, y, **kwargs)
-        bbox = self._bbox_or_default(item_id, fallback)
-        self.delete(item_id)
-        return bbox
-
-    def _measure_body_bbox(
-        self,
-        *,
-        body_x: int,
-        body_y: int,
-        body_width: int,
-        body_text: str,
-    ) -> tuple[int, int, int, int]:
-        return self._measure_text_bbox(
-            x=body_x,
-            y=body_y,
-            anchor="nw",
-            fill=BODY_TEXT_FG,
-            font=BODY_FONT,
-            text=body_text,
-            width=body_width,
-            fallback=(body_x, body_y, body_x + body_width, body_y + 40),
-        )
-
-    def _bbox_or_default(
-        self,
-        item_id: int,
-        default: tuple[int, int, int, int],
-    ) -> tuple[int, int, int, int]:
-        bbox = self.bbox(item_id)
-        if bbox is None:
-            return default
-        return bbox
-
-    def _create_rounded_rectangle(
-        self,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        *,
-        radius: int,
-        **kwargs: object,
-    ) -> int:
-        points = [
-            x1 + radius,
-            y1,
-            x2 - radius,
-            y1,
-            x2,
-            y1,
-            x2,
-            y1 + radius,
-            x2,
-            y2 - radius,
-            x2,
-            y2,
-            x2 - radius,
-            y2,
-            x1 + radius,
-            y2,
-            x1,
-            y2,
-            x1,
-            y2 - radius,
-            x1,
-            y1 + radius,
-            x1,
-            y1,
-        ]
-        return int(
-            self.create_polygon(
-                points,
-                smooth=True,
-                splinesteps=24,
-                **kwargs,
-            )
-        )
 
 
 class CommentListView(tk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, background=COMMENT_COLUMN_BG)
-        self._cards: list[CommentCardCanvas] = []
+        self._comments: list[CommentEntry] = []
+        self._redraw_scheduled = False
 
         self._canvas = tk.Canvas(
             self,
@@ -345,64 +398,86 @@ class CommentListView(tk.Frame):
             relief="flat",
         )
         self._canvas.pack(fill="both", expand=True)
-
-        self._content = tk.Frame(self._canvas, background=COMMENT_COLUMN_BG)
-        self._window_id = self._canvas.create_window((0, 0), window=self._content, anchor="nw")
-
-        self._column = tk.Frame(self._content, background=COMMENT_COLUMN_BG)
-        self._column.pack(fill="both", expand=True, padx=8, pady=(10, 16))
-
-        self._content.bind("<Configure>", self._on_content_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)
         self._canvas.bind("<Button-4>", self._on_mousewheel_linux)
         self._canvas.bind("<Button-5>", self._on_mousewheel_linux)
-        self._content.bind("<MouseWheel>", self._on_mousewheel)
-        self._content.bind("<Button-4>", self._on_mousewheel_linux)
-        self._content.bind("<Button-5>", self._on_mousewheel_linux)
-        self._column.bind("<MouseWheel>", self._on_mousewheel)
-        self._column.bind("<Button-4>", self._on_mousewheel_linux)
-        self._column.bind("<Button-5>", self._on_mousewheel_linux)
+        self.after_idle(self._redraw)
 
     @property
     def overlay_canvas(self) -> tk.Canvas:
         return self._canvas
 
     def clear(self) -> None:
-        for card in self._cards:
-            card.destroy()
-        self._cards.clear()
+        self._comments.clear()
+        self._canvas.delete("comment_card")
         self.after_idle(self._refresh_scrollregion)
 
     def set_comments(self, comments: Sequence[CommentEntry]) -> None:
-        self.clear()
-        for comment in comments:
-            self.add_comment(comment)
+        self._comments = list(reversed(list(comments)))
+        self._schedule_redraw()
 
     def add_comment(self, comment: CommentEntry) -> None:
-        card = CommentCardCanvas(self._column, comment)
-        card.bind("<MouseWheel>", self._on_mousewheel)
-        card.bind("<Button-4>", self._on_mousewheel_linux)
-        card.bind("<Button-5>", self._on_mousewheel_linux)
-        if self._cards:
-            card.pack(fill="x", pady=(0, 5), before=self._cards[0])
-        else:
-            card.pack(fill="x", pady=(0, 5))
-        self._cards.insert(0, card)
-        self.after_idle(self._refresh_scrollregion)
+        self._comments.insert(0, comment)
+        self._schedule_redraw()
         self.after_idle(lambda: self._canvas.yview_moveto(0.0))
 
-    def _on_content_configure(self, _event: tk.Event) -> None:
-        self._refresh_scrollregion()
+    def _schedule_redraw(self) -> None:
+        if self._redraw_scheduled:
+            return
+        self._redraw_scheduled = True
+        self.after_idle(self._redraw)
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
-        width = int(event.width)
-        self._canvas.itemconfigure(self._window_id, width=width)
+        if int(event.width) <= 1:
+            return
+        self._schedule_redraw()
+
+    def _redraw(self) -> None:
+        self._redraw_scheduled = False
+        width = self._canvas.winfo_width()
+        if width <= 1:
+            self.after(10, self._schedule_redraw)
+            return
+
+        self._canvas.delete("comment_card")
+
+        card_left = 12
+        current_y = 10
+        card_right = max(card_left + 220, width - 18)
+        for entry in self._comments:
+            height = _draw_comment_card(
+                self._canvas,
+                entry,
+                card_left=card_left,
+                card_top=current_y,
+                card_right=card_right,
+                tags=("comment_card",),
+            )
+            current_y += height + 5
+
+        self._refresh_scrollregion()
+        if self._canvas.find_withtag("overlay_balloon"):
+            self._canvas.tag_raise("overlay_balloon")
+            self._canvas.tag_lower("comment_card", "overlay_balloon")
+        else:
+            self._canvas.tag_lower("comment_card")
 
     def _refresh_scrollregion(self) -> None:
-        bbox = self._canvas.bbox(self._window_id)
-        if bbox is not None:
-            self._canvas.configure(scrollregion=bbox)
+        bbox = self._canvas.bbox("comment_card")
+        width = max(1, self._canvas.winfo_width())
+        height = max(1, self._canvas.winfo_height())
+        if bbox is None:
+            self._canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        self._canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                max(width, bbox[2] + 12),
+                max(height, bbox[3] + 16),
+            )
+        )
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         delta = getattr(event, "delta", 0)

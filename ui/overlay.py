@@ -203,6 +203,8 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
         "photo": photo,
         "vx": vx,
         "vy": vy,
+        "x": spawn_x,
+        "y": spawn_y,
         "start_x": spawn_x,
         "start_y": spawn_y,
         "start": time.monotonic(),
@@ -297,8 +299,6 @@ def _overlay_tick() -> None:
     if not state.overlay_animating or state.overlay_canvas is None:
         return
     now = time.monotonic()
-    last = state.overlay_last_tick[0]
-    dt = max(0.0, min(0.05, now - last))
     state.overlay_last_tick[0] = now
 
     to_remove: list[dict] = []
@@ -316,25 +316,28 @@ def _overlay_tick() -> None:
     if distance_limit_percent > 0.0:
         distance_limit_px = (canvas_h * distance_limit_percent) / 100.0
     for balloon in list(state.overlay_balloons):
-        balloon["phase"] += dt
-        wobble = math.sin(balloon["phase"] * balloon["freq"]) * balloon["wobble"]
-        dx = (balloon["vx"] + wobble) * dt
-        dy = balloon["vy"] * dt
-        canvas.move(balloon["canvas_id"], dx, dy)
-        coords = canvas.coords(balloon["canvas_id"])
         elapsed = now - balloon["start"]
+        x = balloon["start_x"] + (balloon["vx"] * elapsed)
+        x += math.sin((elapsed * balloon["freq"]) + balloon["phase"]) * balloon["wobble"]
+        y = balloon["start_y"] + (balloon["vy"] * elapsed)
+        balloon["x"] = x
+        balloon["y"] = y
+        try:
+            canvas.coords(balloon["canvas_id"], x, y)
+        except Exception:
+            to_remove.append(balloon)
+            continue
         if (
-            not coords
-            or elapsed >= balloon["life"]
+            elapsed >= balloon["life"]
             or (
                 distance_limit_px > 0.0
-                and abs(coords[1] - balloon.get("start_y", coords[1]))
+                and abs(y - balloon.get("start_y", y))
                 >= distance_limit_px
             )
-            or coords[0] < origin_x - balloon["photo"].width()
-            or coords[0] > origin_x + canvas_w + balloon["photo"].width()
-            or coords[1] < origin_y - balloon["photo"].height()
-            or coords[1] > origin_y + canvas_h + balloon["photo"].height()
+            or x < origin_x - balloon["photo"].width()
+            or x > origin_x + canvas_w + balloon["photo"].width()
+            or y < origin_y - balloon["photo"].height()
+            or y > origin_y + canvas_h + balloon["photo"].height()
         ):
             to_remove.append(balloon)
 
