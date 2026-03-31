@@ -503,18 +503,9 @@ def _open_transcription_history_window(root_ref: tk.Tk) -> None:
     refresh()
 
 
-def _normalized_origin_corner(value: object) -> str:
-    if value in ("bottom_left", "bottom_right"):
-        return str(value)
-    raw_value = str(value)
-    if "right" in raw_value:
-        return "bottom_right"
-    return "bottom_left"
-
-
 def _open_experiment_window(
     root_ref: tk.Tk,
-    refresh_layout_callback: Callable[[], None],
+    _refresh_layout_callback: Callable[[], None],
 ) -> None:
     if _focus_existing_window(state.experiment_window):
         return
@@ -539,7 +530,7 @@ def _open_experiment_window(
     _create_window_header(
         wrapper,
         title="実験パラメータ",
-        description="スタンプ表示の実験用パラメータを変更できます。変更は次のスタンプから反映されます。",
+        description="右25%のコメント欄に重ねて表示するスタンプの実験用パラメータを変更できます。変更は次のスタンプから反映されます。",
         wraplength=500,
     )
 
@@ -549,30 +540,12 @@ def _open_experiment_window(
     )
     scroll_frame.pack(expand=True, fill="both", pady=(10, 0))
 
-    area_var = tk.StringVar(value=getattr(state, "stamp_area_mode", "comment"))
-    initial_corner = _normalized_origin_corner(getattr(state, "stamp_origin_corner", ""))
-    state.stamp_origin_corner = initial_corner
-    corner_var = tk.StringVar(value=initial_corner)
     speed_min_var = tk.DoubleVar(value=getattr(state, "stamp_speed_min_px_s", 90.0))
     speed_max_var = tk.DoubleVar(value=getattr(state, "stamp_speed_max_px_s", 200.0))
     distance_var = tk.DoubleVar(
         value=getattr(state, "stamp_distance_limit_percent", 0.0)
     )
     lifetime_var = tk.DoubleVar(value=getattr(state, "stamp_lifetime_sec", 8.0))
-
-    area_card = _create_titled_card(
-        content,
-        title="表示領域",
-        description="コメント欄のみ表示するか、左75%を使うかを切り替えます。",
-        wraplength=460,
-    )
-
-    corner_card = _create_titled_card(
-        content,
-        title="出現位置",
-        description="左75%モードのときだけ有効です。",
-        wraplength=460,
-    )
 
     speed_card = _create_titled_card(
         content,
@@ -601,70 +574,6 @@ def _open_experiment_window(
         description="実験値を初期値に戻すか、このウィンドウを閉じます。",
         wraplength=460,
     )
-
-    rb_area_comment = admin_theme.create_radiobutton(
-        area_card,
-        text="コメント欄（右25%）",
-        value="comment",
-        variable=area_var,
-        command=lambda: None,
-        background=admin_theme.SURFACE_BG,
-    )
-    rb_area_comment.pack(fill="x", anchor="w", pady=(4, 2))
-
-    rb_area_left = admin_theme.create_radiobutton(
-        area_card,
-        text="左75%",
-        value="left75",
-        variable=area_var,
-        command=lambda: None,
-        background=admin_theme.SURFACE_BG,
-    )
-    rb_area_left.pack(fill="x", anchor="w", pady=2)
-
-    rb_corner_left = admin_theme.create_radiobutton(
-        corner_card,
-        text="左下",
-        value="bottom_left",
-        variable=corner_var,
-        command=lambda: None,
-        background=admin_theme.SURFACE_BG,
-    )
-    rb_corner_left.pack(fill="x", anchor="w", pady=(4, 2))
-
-    rb_corner_right = admin_theme.create_radiobutton(
-        corner_card,
-        text="右下",
-        value="bottom_right",
-        variable=corner_var,
-        command=lambda: None,
-        background=admin_theme.SURFACE_BG,
-    )
-    rb_corner_right.pack(fill="x", anchor="w", pady=2)
-
-    def refresh_corner_controls() -> None:
-        enabled = area_var.get() == "left75"
-        control_state = "normal" if enabled else "disabled"
-        rb_corner_left.configure(state=control_state)
-        rb_corner_right.configure(state=control_state)
-
-    def set_area_mode() -> None:
-        state.stamp_area_mode = area_var.get()
-        refresh_corner_controls()
-        try:
-            refresh_layout_callback()
-        except Exception:
-            pass
-
-    rb_area_comment.configure(command=set_area_mode)
-    rb_area_left.configure(command=set_area_mode)
-
-    def set_corner() -> None:
-        state.stamp_origin_corner = corner_var.get()
-
-    rb_corner_left.configure(command=set_corner)
-    rb_corner_right.configure(command=set_corner)
-    refresh_corner_controls()
 
     tk.Label(
         speed_card,
@@ -763,14 +672,10 @@ def _open_experiment_window(
 
     def reset_defaults() -> None:
         state.reset_stamp_experiment_settings()
-        area_var.set(state.stamp_area_mode)
-        corner_var.set(state.stamp_origin_corner)
         speed_min_var.set(state.stamp_speed_min_px_s)
         speed_max_var.set(state.stamp_speed_max_px_s)
         distance_var.set(state.stamp_distance_limit_percent)
         lifetime_var.set(state.stamp_lifetime_sec)
-        set_area_mode()
-        set_corner()
 
     admin_theme.create_button(
         actions,

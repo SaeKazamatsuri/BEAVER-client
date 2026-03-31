@@ -46,20 +46,15 @@ class BuildLayoutTests(unittest.TestCase):
         self.assertEqual(snapshot.overlay_rect, expected_rect)
         self.assertEqual(snapshot.stamp_area_mode, "comment")
 
-    def test_left75_mode_uses_left_area_for_overlay(self) -> None:
+    def test_non_comment_mode_still_uses_right_quarter(self) -> None:
         monitor = MonitorRect(width=1920, height=1080, x=100, y=20)
 
         snapshot = build_layout(monitor, "left75")
 
-        self.assertEqual(
-            snapshot.comment_rect,
-            WindowRect(width=480, height=1080, x=1540, y=20),
-        )
-        self.assertEqual(
-            snapshot.overlay_rect,
-            WindowRect(width=1440, height=1080, x=100, y=20),
-        )
-        self.assertEqual(snapshot.stamp_area_mode, "left75")
+        expected_rect = WindowRect(width=480, height=1080, x=1540, y=20)
+        self.assertEqual(snapshot.comment_rect, expected_rect)
+        self.assertEqual(snapshot.overlay_rect, expected_rect)
+        self.assertEqual(snapshot.stamp_area_mode, "comment")
 
 
 class DisplayLayoutControllerTests(unittest.TestCase):
@@ -145,7 +140,7 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         self.assertEqual(overlay.rect_calls, [snapshot.overlay_rect])
         self.assertEqual(controller.current_snapshot, snapshot)
 
-    def test_refresh_layout_keeps_active_monitor_when_stamp_area_changes(self) -> None:
+    def test_refresh_layout_keeps_active_monitor_when_mode_input_changes(self) -> None:
         monitors = [
             _FakeMonitor(width=1920, height=1080, x=0, y=0),
             _FakeMonitor(width=1920, height=1080, x=1920, y=0),
@@ -173,8 +168,11 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         assert left75_snapshot is not None
         self.assertEqual(controller.active_monitor_index, 1)
         self.assertEqual(comment_snapshot.comment_rect, left75_snapshot.comment_rect)
-        self.assertNotEqual(comment_snapshot.overlay_rect, left75_snapshot.overlay_rect)
-        self.assertEqual(left75_snapshot.overlay_rect, WindowRect(width=1440, height=1080, x=1920, y=0))
+        self.assertEqual(comment_snapshot.overlay_rect, left75_snapshot.overlay_rect)
+        self.assertEqual(
+            left75_snapshot.overlay_rect,
+            WindowRect(width=480, height=1080, x=3360, y=0),
+        )
         self.assertEqual(root.geometry_calls, [left75_snapshot.comment_rect.to_geometry()])
         self.assertEqual(overlay.rect_calls, [left75_snapshot.overlay_rect])
 

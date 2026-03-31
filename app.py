@@ -13,7 +13,7 @@ from ui.comment_ui import COMMENT_COLUMN_BG, CommentListView, comment_entry_from
 from ui.display_layout import DisplayLayoutController
 from ui.overlay import (
     annotate_entry,
-    ensure_overlay_window,
+    bind_overlay_canvas,
     enqueue_stamp_balloon,
     is_stamp,
     stop_overlay,
@@ -35,13 +35,11 @@ def main() -> None:
     layout_controller = DisplayLayoutController(
         root=root,
         overlay_geometry_updater=update_overlay_geometry,
-        stamp_area_mode_getter=lambda: getattr(state, "stamp_area_mode", "comment"),
+        stamp_area_mode_getter=lambda: "comment",
     )
     layout_controller.apply_layout()
     root.update()
     set_always_on_top(root.winfo_id())
-    ensure_overlay_window(root)
-    layout_controller.refresh_layout()
     start_transcription_service(
         lambda: state.CURRENT_SESSION if state.session_ready else None,
         state.record_transcription_service_update,
@@ -53,6 +51,8 @@ def main() -> None:
 
     comment_list = CommentListView(wrapper)
     comment_list.pack(expand=True, fill="both")
+    bind_overlay_canvas(comment_list.overlay_canvas)
+    layout_controller.refresh_layout()
 
     rendered_generation, existing_comments = state.snapshot_messages()
     if existing_comments:

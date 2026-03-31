@@ -364,6 +364,10 @@ class CommentListView(tk.Frame):
         self._column.bind("<Button-4>", self._on_mousewheel_linux)
         self._column.bind("<Button-5>", self._on_mousewheel_linux)
 
+    @property
+    def overlay_canvas(self) -> tk.Canvas:
+        return self._canvas
+
     def clear(self) -> None:
         for card in self._cards:
             card.destroy()
@@ -396,7 +400,7 @@ class CommentListView(tk.Frame):
         self._canvas.itemconfigure(self._window_id, width=width)
 
     def _refresh_scrollregion(self) -> None:
-        bbox = self._canvas.bbox("all")
+        bbox = self._canvas.bbox(self._window_id)
         if bbox is not None:
             self._canvas.configure(scrollregion=bbox)
 

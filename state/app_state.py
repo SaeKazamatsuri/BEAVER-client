@@ -39,8 +39,8 @@ transcription_history_window: tk.Toplevel | None = None
 
 # --- Experiment (stamp) settings ---
 # These values are intentionally mutable so experiments can tweak them at runtime.
-STAMP_AREA_MODES = ("comment", "left75")
-STAMP_ORIGIN_CORNERS = ("bottom_right", "bottom_left")
+STAMP_AREA_MODES = ("comment",)
+STAMP_ORIGIN_CORNERS = ("bottom_right",)
 
 stamp_area_mode: str = "comment"
 stamp_origin_corner: str = "bottom_right"

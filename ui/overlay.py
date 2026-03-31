@@ -14,7 +14,6 @@ import tkinter as tk
 
 from config.constants import (
     BACKEND_BASE_URL,
-    OVERLAY_TRANSPARENT_COLOR,
     STAMP_BALLOON_LIFETIME_SEC,
     STAMP_BALLOON_MAX_ACTIVE,
     STAMP_BALLOON_MAX_SPEED_PX,
@@ -128,10 +127,6 @@ def _download_and_prepare_stamp(stamp_id: str, url: str) -> None:
 
 
 def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
-    root = state.root
-    if root is None:
-        return
-    ensure_overlay_window(root)
     canvas = state.overlay_canvas
     if canvas is None:
         return
@@ -152,27 +147,15 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
             pass
 
     canvas.update_idletasks()
-    canvas_w = canvas.winfo_width() or root.winfo_width()
-    canvas_h = canvas.winfo_height() or root.winfo_height()
+    canvas_w = canvas.winfo_width()
+    canvas_h = canvas.winfo_height()
     if canvas_w <= 0 or canvas_h <= 0:
-        root.after(120, lambda: _spawn_balloon_from_bytes(stamp_id, data))
+        root = state.root
+        if root is not None:
+            root.after(120, lambda: _spawn_balloon_from_bytes(stamp_id, data))
         return
 
-    area_mode = getattr(state, "stamp_area_mode", "comment")
-    corner = getattr(state, "stamp_origin_corner", "bottom_right")
-    valid_corners = getattr(
-        state,
-        "STAMP_ORIGIN_CORNERS",
-        ("bottom_right", "bottom_left"),
-    )
-    if corner not in valid_corners:
-        if corner == "top_left":
-            corner = "bottom_left"
-        elif corner == "top_right":
-            corner = "bottom_right"
-        else:
-            corner = "bottom_right"
-    is_left = "left" in corner
+    origin_x, origin_y = _canvas_view_origin(canvas)
 
     speed_min = getattr(state, "stamp_speed_min_px_s", STAMP_BALLOON_MIN_SPEED_PX)
     speed_max = getattr(state, "stamp_speed_max_px_s", STAMP_BALLOON_MAX_SPEED_PX)
@@ -187,22 +170,20 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
     speed = random.uniform(speed_min, speed_max)
 
     half_w = photo.width() / 2
-    min_x = STAMP_BALLOON_START_PADDING + half_w
-    max_x = max(min_x + 1, canvas_w - min_x)
-    if area_mode == "comment":
-        spawn_x = random.uniform(min_x, max_x)
-    else:
-        span = max(1.0, (max_x - min_x) * 0.35)
-        if is_left:
-            x0, x1 = min_x, min(max_x, min_x + span)
-        else:
-            x0, x1 = max(min_x, max_x - span), max_x
-        spawn_x = random.uniform(x0, x1)
+    min_x = origin_x + STAMP_BALLOON_START_PADDING + half_w
+    max_x = max(min_x + 1.0, origin_x + canvas_w - STAMP_BALLOON_START_PADDING - half_w)
+    spawn_x = random.uniform(min_x, max_x)
 
     y_off = photo.height() / 2 + 12
-    spawn_y = canvas_h + y_off
+    spawn_y = origin_y + canvas_h + y_off
 
-    canvas_id = canvas.create_image(spawn_x, spawn_y, image=photo, anchor="center")
+    canvas_id = canvas.create_image(
+        spawn_x,
+        spawn_y,
+        image=photo,
+        anchor="center",
+        tags=("overlay_balloon",),
+    )
     life = getattr(state, "stamp_lifetime_sec", STAMP_BALLOON_LIFETIME_SEC)
     try:
         life = float(life)
@@ -210,10 +191,8 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
         life = STAMP_BALLOON_LIFETIME_SEC
     life = max(0.1, life)
 
-    if area_mode == "left75":
-        horizontal_sign = 1.0 if is_left else -1.0
-    else:
-        horizontal_sign = 1.0 if spawn_x < (canvas_w / 2) else -1.0
+    canvas_mid_x = origin_x + (canvas_w / 2.0)
+    horizontal_sign = 1.0 if spawn_x < canvas_mid_x else -1.0
     vx = random.uniform(-0.15 * speed, 0.15 * speed) + (
         horizontal_sign * random.uniform(0.05 * speed, 0.25 * speed)
     )
@@ -235,7 +214,7 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
         ),
     }
     state.overlay_balloons.append(balloon)
-    _schedule_force_hide(root, canvas_id, life)
+    _schedule_force_hide(canvas, canvas_id, life)
     while len(state.overlay_balloons) > STAMP_BALLOON_MAX_ACTIVE:
         old = state.overlay_balloons.pop(0)
         try:
@@ -244,8 +223,8 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
             pass
 
 
-def _schedule_force_hide(root_ref: tk.Tk, canvas_id: int, seconds: float) -> None:
-    if root_ref is None or canvas_id is None:
+def _schedule_force_hide(canvas: tk.Canvas, canvas_id: int, seconds: float) -> None:
+    if canvas_id is None:
         return
     try:
         ms = int(max(0.0, float(seconds)) * 1000)
@@ -258,7 +237,7 @@ def _schedule_force_hide(root_ref: tk.Tk, canvas_id: int, seconds: float) -> Non
         _force_remove_balloon(canvas_id)
 
     try:
-        root_ref.after(ms, _cb)
+        canvas.after(ms, _cb)
     except Exception:
         pass
 
@@ -279,53 +258,39 @@ def _force_remove_balloon(canvas_id: int) -> None:
             break
 
 
-def ensure_overlay_window(root_ref: tk.Tk) -> None:
-    if state.overlay_window is not None and state.overlay_canvas is not None:
-        return
-    overlay = tk.Toplevel(root_ref)
-    overlay.overrideredirect(True)
-    overlay.configure(bg=OVERLAY_TRANSPARENT_COLOR)
-    overlay.attributes("-topmost", True)
-    try:
-        overlay.attributes("-transparentcolor", OVERLAY_TRANSPARENT_COLOR)
-    except tk.TclError:
-        pass
-    try:
-        overlay.wm_attributes("-disabled", True)
-    except tk.TclError:
-        pass
-    canvas = tk.Canvas(
-        overlay, bg=OVERLAY_TRANSPARENT_COLOR, highlightthickness=0, bd=0
-    )
-    canvas.pack(fill="both", expand=True)
-    state.overlay_window = overlay
+def bind_overlay_canvas(canvas: tk.Canvas) -> None:
     state.overlay_canvas = canvas
+    state.overlay_window = None
+    if state.overlay_animating:
+        return
     state.overlay_animating = True
     state.overlay_last_tick[0] = time.monotonic()
     canvas.after(16, _overlay_tick)
-    _raise_overlay_window()
 
 
-def _raise_overlay_window() -> None:
-    overlay = state.overlay_window
-    if overlay is None:
+def ensure_overlay_window(_root_ref: tk.Tk) -> None:
+    if state.overlay_canvas is None:
         return
-    try:
-        overlay.lift()
-    except Exception:
-        pass
-    try:
-        overlay.attributes("-topmost", True)
-    except tk.TclError:
-        pass
+    if not state.overlay_animating:
+        bind_overlay_canvas(state.overlay_canvas)
 
 
 def update_overlay_geometry(rect: WindowRect) -> None:
-    if state.overlay_window is None or state.overlay_canvas is None:
+    if state.overlay_canvas is None:
         return
-    state.overlay_window.geometry(rect.to_geometry())
     state.overlay_canvas.config(width=rect.width, height=rect.height)
-    _raise_overlay_window()
+
+
+def _canvas_view_origin(canvas: tk.Canvas) -> Tuple[float, float]:
+    try:
+        origin_x = float(canvas.canvasx(0))
+    except Exception:
+        origin_x = 0.0
+    try:
+        origin_y = float(canvas.canvasy(0))
+    except Exception:
+        origin_y = 0.0
+    return origin_x, origin_y
 
 
 def _overlay_tick() -> None:
@@ -340,6 +305,7 @@ def _overlay_tick() -> None:
     canvas = state.overlay_canvas
     canvas_w = canvas.winfo_width()
     canvas_h = canvas.winfo_height()
+    origin_x, origin_y = _canvas_view_origin(canvas)
     distance_limit_percent = getattr(state, "stamp_distance_limit_percent", 0.0)
     try:
         distance_limit_percent = float(distance_limit_percent)
@@ -365,10 +331,10 @@ def _overlay_tick() -> None:
                 and abs(coords[1] - balloon.get("start_y", coords[1]))
                 >= distance_limit_px
             )
-            or coords[0] < -balloon["photo"].width()
-            or coords[0] > canvas_w + balloon["photo"].width()
-            or coords[1] < -balloon["photo"].height()
-            or coords[1] > canvas_h + balloon["photo"].height()
+            or coords[0] < origin_x - balloon["photo"].width()
+            or coords[0] > origin_x + canvas_w + balloon["photo"].width()
+            or coords[1] < origin_y - balloon["photo"].height()
+            or coords[1] > origin_y + canvas_h + balloon["photo"].height()
         ):
             to_remove.append(balloon)
 
@@ -388,11 +354,15 @@ def _overlay_tick() -> None:
 
 def stop_overlay() -> None:
     state.overlay_animating = False
+    canvas = state.overlay_canvas
+    if canvas is not None:
+        for balloon in list(state.overlay_balloons):
+            canvas_id = balloon.get("canvas_id")
+            if isinstance(canvas_id, int):
+                try:
+                    canvas.delete(canvas_id)
+                except Exception:
+                    pass
     state.overlay_balloons.clear()
-    if state.overlay_window is not None:
-        try:
-            state.overlay_window.destroy()
-        except Exception:
-            pass
     state.overlay_window = None
     state.overlay_canvas = None

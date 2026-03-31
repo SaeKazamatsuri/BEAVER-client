@@ -84,7 +84,7 @@ def load_monitor_rects(
 
 def build_layout(
     monitor: MonitorRect,
-    stamp_area_mode: str,
+    _stamp_area_mode: str,
 ) -> DisplayLayoutSnapshot:
     comment_width = max(1, monitor.width // 4)
     comment_rect = WindowRect(
@@ -93,21 +93,12 @@ def build_layout(
         x=monitor.x + monitor.width - comment_width,
         y=monitor.y,
     )
-    normalized_mode = "left75" if stamp_area_mode == "left75" else "comment"
-    if normalized_mode == "left75":
-        overlay_rect = WindowRect(
-            width=max(1, monitor.width - comment_width),
-            height=max(1, monitor.height),
-            x=monitor.x,
-            y=monitor.y,
-        )
-    else:
-        overlay_rect = comment_rect
+    overlay_rect = comment_rect
     return DisplayLayoutSnapshot(
         monitor=monitor,
         comment_rect=comment_rect,
         overlay_rect=overlay_rect,
-        stamp_area_mode=normalized_mode,
+        stamp_area_mode="comment",
     )
 
 
