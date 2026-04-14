@@ -27,12 +27,8 @@ def _resolve_base_dir() -> Path:
     return _candidate_base_dir_paths()[0]
 
 
-def _resolve_transcription_work_dir() -> Path:
-    for base_dir in _candidate_base_dir_paths():
-        transcription_dir = base_dir / "transcription"
-        if transcription_dir.is_dir():
-            return transcription_dir
-    return _resolve_base_dir() / "transcription"
+def _resolve_transcription_temp_dir() -> Path:
+    return _resolve_base_dir() / "transcription-temp"
 
 
 _BASE_DIR_PATH = _resolve_base_dir()
@@ -62,10 +58,15 @@ BACKEND_WS_BASE_URL = _trim_trailing_slash(
 )
 BACKEND_WS_ORIGIN = os.environ.get("BACKEND_WS_ORIGIN", "https://beaver.works")
 BACKEND_HTTP_TIMEOUT_SEC = 10
+BACKEND_UPLOAD_TIMEOUT_SEC = 120
 
-TRANSCRIPTION_WORK_DIR = _resolve_transcription_work_dir()
-TRANSCRIPTION_CSV_PATH = TRANSCRIPTION_WORK_DIR / "transcript.csv"
-TRANSCRIPTION_EXECUTABLE_PATH = TRANSCRIPTION_WORK_DIR / "vosk.exe"
+TRANSCRIPTION_TEMP_DIR = _resolve_transcription_temp_dir()
+TRANSCRIPTION_SAMPLE_RATE_HZ = 16_000
+TRANSCRIPTION_CHANNELS = 1
+TRANSCRIPTION_SAMPLE_WIDTH_BYTES = 2
+TRANSCRIPTION_CHUNK_DURATION_SEC = 120
+TRANSCRIPTION_READ_FRAMES = 1_600
+TRANSCRIPTION_BACKLOG_LIMIT = 10
 
 STAMP_BALLOON_LIFETIME_SEC = 8.0
 STAMP_BALLOON_MIN_SPEED_PX = 90.0

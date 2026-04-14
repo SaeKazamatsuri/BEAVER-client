@@ -139,6 +139,10 @@ def _status_badge(snapshot: dict[str, object]) -> str:
         return "未接続"
     if state_value == "starting":
         return "起動中"
+    if state_value == "recording":
+        return "録音中"
+    if state_value == "uploading":
+        return "送信中"
     if state_value == "error":
         return "異常"
     if bool(snapshot.get("process_alive", False)):

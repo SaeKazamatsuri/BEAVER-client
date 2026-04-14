@@ -9,6 +9,7 @@ import requests
 from config.constants import (
     BACKEND_BASE_URL,
     BACKEND_HTTP_TIMEOUT_SEC,
+    BACKEND_UPLOAD_TIMEOUT_SEC,
     BACKEND_WS_BASE_URL,
 )
 
@@ -90,6 +91,46 @@ def post_transcription(session: str, text: str) -> dict[str, object]:
         "transcription response",
     )
     if response.status_code != requests.codes.created:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_transcription_item(payload)
+
+
+def post_transcription_chunk(
+    session: str,
+    chunk_sequence: int,
+    recorded_from: str,
+    recorded_to: str,
+    audio_path: str,
+) -> dict[str, object]:
+    url = build_api_url("/api/transcription-chunks")
+    try:
+        with open(audio_path, "rb") as audio_file:
+            response = requests.post(
+                url,
+                data={
+                    "session": session,
+                    "chunkSequence": str(chunk_sequence),
+                    "recordedFrom": recorded_from,
+                    "recordedTo": recorded_to,
+                },
+                files={
+                    "audio": ("chunk.wav", audio_file, "audio/wav"),
+                },
+                timeout=BACKEND_UPLOAD_TIMEOUT_SEC,
+            )
+    except OSError as exc:
+        raise BackendApiError(f"Failed to open audio chunk: {exc}") from exc
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+
+    payload = _require_mapping(
+        _parse_json_payload(response),
+        "transcription chunk response",
+    )
+    if response.status_code not in (requests.codes.ok, requests.codes.created):
         error_message = payload.get("error")
         if isinstance(error_message, str) and error_message:
             raise BackendApiError(error_message)

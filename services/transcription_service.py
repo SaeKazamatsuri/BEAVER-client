@@ -1,24 +1,46 @@
 from __future__ import annotations
 
-import csv
-import subprocess
-import sys
 import threading
+import time
+import wave
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from config.constants import (
-    TRANSCRIPTION_CSV_PATH,
-    TRANSCRIPTION_EXECUTABLE_PATH,
-    TRANSCRIPTION_WORK_DIR,
+    TRANSCRIPTION_BACKLOG_LIMIT,
+    TRANSCRIPTION_CHANNELS,
+    TRANSCRIPTION_CHUNK_DURATION_SEC,
+    TRANSCRIPTION_READ_FRAMES,
+    TRANSCRIPTION_SAMPLE_RATE_HZ,
+    TRANSCRIPTION_SAMPLE_WIDTH_BYTES,
+    TRANSCRIPTION_TEMP_DIR,
 )
-from services.backend_api import post_transcription
+from services.backend_api import post_transcription_chunk
+
+try:
+    import sounddevice
+except ImportError:  # pragma: no cover - exercised through runtime guard
+    sounddevice = None
 
 StatusCallback = Callable[[dict[str, object], dict[str, object] | None], None]
 ItemCallback = Callable[[dict[str, object]], None]
 
 _MISSING = object()
+
+
+@dataclass(slots=True)
+class PendingChunk:
+    generation: int
+    session: str
+    chunk_sequence: int
+    recorded_from: str
+    recorded_to: str
+    path: Path
+    retry_count: int = 0
+    next_attempt_at: float = 0.0
 
 
 def _now_iso() -> str:
@@ -29,48 +51,15 @@ def _now_iso() -> str:
     )
 
 
-def _build_hidden_process_options() -> tuple[subprocess.STARTUPINFO | None, int]:
-    if sys.platform != "win32":
-        return None, 0
-
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-    return startupinfo, subprocess.CREATE_NO_WINDOW
+def _cleanup_path(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
-def _start_transcription_process() -> subprocess.Popen[str]:
-    command = [
-        str(TRANSCRIPTION_EXECUTABLE_PATH),
-        "--output-csv",
-        str(TRANSCRIPTION_CSV_PATH),
-        "--quiet",
-    ]
-    startupinfo, creationflags = _build_hidden_process_options()
-    if startupinfo is None:
-        return subprocess.Popen(
-            command,
-            cwd=str(TRANSCRIPTION_WORK_DIR),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-
-    return subprocess.Popen(
-        command,
-        cwd=str(TRANSCRIPTION_WORK_DIR),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-    )
+def _retry_delay_seconds(retry_count: int) -> float:
+    return min(60.0, float(2 ** min(retry_count, 5)))
 
 
 class TranscriptionService:
@@ -84,9 +73,14 @@ class TranscriptionService:
         self._status_callback = status_callback
         self._item_callback = item_callback
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._process: subprocess.Popen[str] | None = None
+        self._controller_thread: threading.Thread | None = None
+        self._uploader_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._queue_condition = threading.Condition()
+        self._pending_chunks: deque[PendingChunk] = deque()
+        self._generation = 0
+        self._next_chunk_sequence = 1
+        self._paused_session: str | None = None
         self._status_snapshot: dict[str, object] = {
             "state": "idle",
             "process_alive": False,
@@ -99,10 +93,17 @@ class TranscriptionService:
 
     def start(self) -> None:
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self._controller_thread is not None and self._controller_thread.is_alive():
                 return
             self._stop_event.clear()
-            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._controller_thread = threading.Thread(
+                target=self._run_controller,
+                daemon=True,
+            )
+            self._uploader_thread = threading.Thread(
+                target=self._run_uploader,
+                daemon=True,
+            )
         started_at = _now_iso()
         self._publish_status(
             state="starting",
@@ -110,213 +111,322 @@ class TranscriptionService:
             session=self._current_session(),
             last_started_at=started_at,
             event_name="起動開始",
-            event_detail="文字起こしプロセスを起動しています。",
+            event_detail="録音サービスを起動しています。",
             event_time=started_at,
         )
-        thread = self._thread
-        if thread is not None:
-            thread.start()
+        TRANSCRIPTION_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        controller_thread = self._controller_thread
+        uploader_thread = self._uploader_thread
+        if controller_thread is not None:
+            controller_thread.start()
+        if uploader_thread is not None:
+            uploader_thread.start()
 
     def stop(self) -> None:
         with self._lock:
             self._stop_event.set()
-            process = self._process
-            thread = self._thread
-        if process is not None:
-            _terminate_process(process)
-        if thread is not None:
-            thread.join(timeout=3.0)
+            controller_thread = self._controller_thread
+            uploader_thread = self._uploader_thread
+        with self._queue_condition:
+            self._queue_condition.notify_all()
+        if controller_thread is not None:
+            controller_thread.join(timeout=3.0)
+        if uploader_thread is not None:
+            uploader_thread.join(timeout=3.0)
+
+        cleanup_paths = self._reset_generation(None)
+        for path in cleanup_paths:
+            _cleanup_path(path)
+
         with self._lock:
-            self._process = None
-            self._thread = None
+            self._controller_thread = None
+            self._uploader_thread = None
+
         stopped_at = _now_iso()
         self._publish_status(
             state="stopped",
             process_alive=False,
             session=self._current_session(),
             event_name="停止",
-            event_detail="文字起こしサービスを停止しました。",
+            event_detail="録音サービスを停止しました。",
             event_time=stopped_at,
         )
 
-    def _run(self) -> None:
-        current_session = self._current_session()
-        if not TRANSCRIPTION_EXECUTABLE_PATH.is_file():
-            missing_at = _now_iso()
-            missing_message = (
-                "文字起こし実行ファイルが見つかりません: "
-                f"{TRANSCRIPTION_EXECUTABLE_PATH}"
-            )
-            self._publish_status(
-                state="error",
-                process_alive=False,
-                session=current_session,
-                last_error_at=missing_at,
-                last_error_message=missing_message,
-                event_name="実行ファイル未検出",
-                event_detail=missing_message,
-                event_time=missing_at,
-            )
-            return
-
-        try:
-            process = _start_transcription_process()
-        except OSError as exc:
-            failed_at = _now_iso()
-            self._publish_status(
-                state="error",
-                process_alive=False,
-                session=current_session,
-                last_error_at=failed_at,
-                last_error_message=str(exc),
-                event_name="起動失敗",
-                event_detail=f"文字起こしプロセスの起動に失敗しました: {exc}",
-                event_time=failed_at,
-            )
-            return
-
-        with self._lock:
-            self._process = process
-
-        started_at = _now_iso()
-        self._publish_status(
-            state="idle",
-            process_alive=True,
-            session=current_session,
-            event_name="起動成功",
-            event_detail="文字起こしプロセスが起動しました。",
-            event_time=started_at,
-        )
-        self._publish_status(
-            state="idle",
-            process_alive=True,
-            session=current_session,
-            event_name="待機中",
-            event_detail="音声入力を待機しています。",
-            event_time=started_at,
-        )
-
-        exit_code: int | None = None
-        csv_sync_thread = threading.Thread(
-            target=self._run_csv_sync,
-            args=(process,),
-            daemon=True,
-        )
-        csv_sync_thread.start()
-
-        try:
-            while not self._stop_event.is_set():
-                polled_exit_code = process.poll()
-                if polled_exit_code is not None:
-                    exit_code = polled_exit_code
-                    break
-                self._stop_event.wait(0.5)
-            if exit_code is None and not self._stop_event.is_set():
-                exit_code = process.poll()
-        except Exception as exc:
-            if not self._stop_event.is_set():
-                failed_at = _now_iso()
-                self._publish_status(
-                    state="error",
-                    process_alive=False,
-                    session=self._current_session(),
-                    last_error_at=failed_at,
-                    last_error_message=str(exc),
-                    event_name="プロセス異常終了",
-                    event_detail=f"文字起こしプロセスが異常終了しました: {exc}",
-                    event_time=failed_at,
-                )
-        finally:
-            csv_sync_thread.join(timeout=2.0)
-            _terminate_process(process)
-            with self._lock:
-                if self._process is process:
-                    self._process = None
-            if exit_code is not None and not self._stop_event.is_set():
-                finished_at = _now_iso()
-                if exit_code == 0:
-                    self._publish_status(
-                        state="stopped",
-                        process_alive=False,
-                        session=self._current_session(),
-                        last_error_at=None,
-                        last_error_message=None,
-                        event_name="停止",
-                        event_detail="文字起こしプロセスが正常終了しました。",
-                        event_time=finished_at,
-                    )
-                else:
-                    detail = (
-                        f"文字起こしプロセスが終了コード {exit_code} で停止しました。"
-                    )
-                    self._publish_status(
-                        state="error",
-                        process_alive=False,
-                        session=self._current_session(),
-                        last_error_at=finished_at,
-                        last_error_message=detail,
-                        event_name="プロセス異常終了",
-                        event_detail=detail,
-                        event_time=finished_at,
-                    )
-
-    def _run_csv_sync(self, process: subprocess.Popen[str]) -> None:
-        processed_row_count = _read_transcript_row_count()
-        pending_rows: deque[tuple[str, str]] = deque()
+    def _run_controller(self) -> None:
+        active_session: str | None = None
+        last_idle_published = False
 
         while not self._stop_event.is_set():
-            current_session = self._current_session()
-            new_rows, processed_row_count = _read_new_transcript_rows(
-                processed_row_count,
-                current_session,
-            )
-            pending_rows.extend(new_rows)
-            self._flush_pending_rows(pending_rows)
+            session = self._current_session()
+            if session is None:
+                if active_session is not None:
+                    cleanup_paths = self._reset_generation(None)
+                    for path in cleanup_paths:
+                        _cleanup_path(path)
+                    active_session = None
+                if not last_idle_published:
+                    self._publish_status(
+                        state="idle",
+                        process_alive=False,
+                        session=None,
+                        event_name="待機中",
+                        event_detail="セッション接続待ちです。",
+                        event_time=_now_iso(),
+                    )
+                    last_idle_published = True
+                self._stop_event.wait(0.2)
+                continue
 
-            if process.poll() is not None:
-                final_session = self._current_session()
-                final_rows, processed_row_count = _read_new_transcript_rows(
-                    processed_row_count,
-                    final_session,
+            if session != active_session:
+                cleanup_paths = self._reset_generation(session)
+                for path in cleanup_paths:
+                    _cleanup_path(path)
+                active_session = session
+                last_idle_published = False
+                self._publish_status(
+                    state="recording",
+                    process_alive=True,
+                    session=session,
+                    last_error_at=None,
+                    last_error_message=None,
+                    event_name="録音開始",
+                    event_detail="2分チャンク録音を開始しました。",
+                    event_time=_now_iso(),
                 )
-                pending_rows.extend(final_rows)
-                self._flush_pending_rows(pending_rows)
-                return
 
-            if self._stop_event.wait(0.5):
-                return
+            if self._is_paused(session):
+                self._stop_event.wait(0.2)
+                continue
 
-    def _flush_pending_rows(self, pending_rows: deque[tuple[str, str]]) -> None:
-        while pending_rows and not self._stop_event.is_set():
-            session, text = pending_rows[0]
             try:
-                item = post_transcription(session, text)
+                completed_chunk = self._record_chunk(session)
             except Exception as exc:
                 failed_at = _now_iso()
                 self._publish_status(
                     state="error",
-                    process_alive=True,
+                    process_alive=False,
                     session=session,
                     last_error_at=failed_at,
                     last_error_message=str(exc),
-                    event_name="送信失敗",
-                    event_detail=f"文字起こしの保存に失敗しました: {exc}",
+                    event_name="録音失敗",
+                    event_detail=f"録音に失敗しました: {exc}",
                     event_time=failed_at,
                 )
-                return
+                self._stop_event.wait(1.0)
+                continue
 
-            pending_rows.popleft()
-            created_at = str(item.get("created_at") or _now_iso())
+            if completed_chunk is None:
+                continue
+
+            overflowed = self._enqueue_chunk(completed_chunk)
+            if overflowed:
+                _cleanup_path(completed_chunk.path)
+                self._publish_status(
+                    state="error",
+                    process_alive=False,
+                    session=session,
+                    last_error_at=_now_iso(),
+                    last_error_message="送信待ちチャンクが上限を超えました。",
+                    event_name="待機超過",
+                    event_detail="未送信チャンクが上限を超えたため録音を一時停止しました。",
+                    event_time=_now_iso(),
+                )
+                continue
+
             self._publish_status(
-                state="running",
+                state="recording",
                 process_alive=True,
                 session=session,
+                event_name="録音完了",
+                event_detail="2分音声を送信キューへ追加しました。",
+                event_time=completed_chunk.recorded_to,
+            )
+
+    def _run_uploader(self) -> None:
+        while not self._stop_event.is_set():
+            chunk = self._wait_for_next_chunk()
+            if chunk is None:
+                continue
+
+            self._publish_status(
+                state="uploading",
+                process_alive=True,
+                session=chunk.session,
+                event_name="送信開始",
+                event_detail="音声チャンクをバックエンドへ送信しています。",
+                event_time=_now_iso(),
+            )
+
+            try:
+                item = post_transcription_chunk(
+                    chunk.session,
+                    chunk.chunk_sequence,
+                    chunk.recorded_from,
+                    chunk.recorded_to,
+                    str(chunk.path),
+                )
+            except Exception as exc:
+                self._mark_chunk_retry(chunk, str(exc))
+                continue
+
+            self._pop_uploaded_chunk(chunk)
+            created_at = str(item.get("created_at") or _now_iso())
+            self._publish_status(
+                state="recording",
+                process_alive=True,
+                session=chunk.session,
                 last_success_at=created_at,
-                event_name="送信成功",
+                last_error_at=None,
+                last_error_message=None,
+                event_name="保存完了",
                 event_detail="文字起こしをバックエンドへ保存しました。",
                 event_time=created_at,
             )
             self._notify_item(item)
+
+    def _record_chunk(self, session: str) -> PendingChunk | None:
+        generation, chunk_sequence = self._snapshot_recording_state(session)
+        path = TRANSCRIPTION_TEMP_DIR / f"{session}-{generation}-{chunk_sequence}.wav"
+        recorded_from = _now_iso()
+        deadline = time.monotonic() + TRANSCRIPTION_CHUNK_DURATION_SEC
+
+        with self._create_stream() as stream:
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(TRANSCRIPTION_CHANNELS)
+                wav_file.setsampwidth(TRANSCRIPTION_SAMPLE_WIDTH_BYTES)
+                wav_file.setframerate(TRANSCRIPTION_SAMPLE_RATE_HZ)
+
+                while not self._stop_event.is_set():
+                    current_session = self._current_session()
+                    if current_session != session:
+                        _cleanup_path(path)
+                        return None
+                    if self._is_generation_stale(generation, session):
+                        _cleanup_path(path)
+                        return None
+
+                    audio_bytes, _overflowed = stream.read(TRANSCRIPTION_READ_FRAMES)
+                    wav_file.writeframes(audio_bytes)
+
+                    if time.monotonic() >= deadline:
+                        break
+
+        if self._stop_event.is_set() or self._current_session() != session:
+            _cleanup_path(path)
+            return None
+
+        recorded_to = _now_iso()
+        return PendingChunk(
+            generation=generation,
+            session=session,
+            chunk_sequence=chunk_sequence,
+            recorded_from=recorded_from,
+            recorded_to=recorded_to,
+            path=path,
+        )
+
+    def _create_stream(self):
+        if sounddevice is None:
+            raise RuntimeError("sounddevice がインストールされていません。")
+        return sounddevice.RawInputStream(
+            samplerate=TRANSCRIPTION_SAMPLE_RATE_HZ,
+            channels=TRANSCRIPTION_CHANNELS,
+            dtype="int16",
+            blocksize=TRANSCRIPTION_READ_FRAMES,
+        )
+
+    def _snapshot_recording_state(self, session: str) -> tuple[int, int]:
+        with self._queue_condition:
+            if self._paused_session == session:
+                raise RuntimeError("送信待ちが上限を超えているため録音を停止中です。")
+            return self._generation, self._next_chunk_sequence
+
+    def _is_generation_stale(self, generation: int, session: str) -> bool:
+        with self._queue_condition:
+            return generation != self._generation or self._paused_session == session
+
+    def _enqueue_chunk(self, chunk: PendingChunk) -> bool:
+        with self._queue_condition:
+            if chunk.generation != self._generation:
+                return False
+            if len(self._pending_chunks) >= TRANSCRIPTION_BACKLOG_LIMIT:
+                self._paused_session = chunk.session
+                return True
+            self._pending_chunks.append(chunk)
+            self._next_chunk_sequence = chunk.chunk_sequence + 1
+            self._queue_condition.notify_all()
+            return False
+
+    def _wait_for_next_chunk(self) -> PendingChunk | None:
+        with self._queue_condition:
+            while not self._stop_event.is_set():
+                if not self._pending_chunks:
+                    self._queue_condition.wait(timeout=0.5)
+                    continue
+                chunk = self._pending_chunks[0]
+                if chunk.generation != self._generation:
+                    stale_chunk = self._pending_chunks.popleft()
+                    _cleanup_path(stale_chunk.path)
+                    continue
+                now = time.monotonic()
+                if chunk.next_attempt_at > now:
+                    self._queue_condition.wait(timeout=chunk.next_attempt_at - now)
+                    continue
+                return chunk
+        return None
+
+    def _mark_chunk_retry(self, chunk: PendingChunk, error_message: str) -> None:
+        failed_at = _now_iso()
+        with self._queue_condition:
+            if self._pending_chunks and self._pending_chunks[0] is chunk:
+                chunk.retry_count += 1
+                chunk.next_attempt_at = time.monotonic() + _retry_delay_seconds(
+                    chunk.retry_count
+                )
+                self._queue_condition.notify_all()
+        self._publish_status(
+            state="error",
+            process_alive=True,
+            session=chunk.session,
+            last_error_at=failed_at,
+            last_error_message=error_message,
+            event_name="送信失敗",
+            event_detail=f"音声チャンクの送信に失敗しました: {error_message}",
+            event_time=failed_at,
+        )
+
+    def _pop_uploaded_chunk(self, chunk: PendingChunk) -> None:
+        with self._queue_condition:
+            if self._pending_chunks and self._pending_chunks[0] is chunk:
+                self._pending_chunks.popleft()
+            if self._paused_session == chunk.session and (
+                len(self._pending_chunks) < TRANSCRIPTION_BACKLOG_LIMIT
+            ):
+                self._paused_session = None
+                self._queue_condition.notify_all()
+                self._publish_status(
+                    state="recording",
+                    process_alive=True,
+                    session=chunk.session,
+                    event_name="録音再開",
+                    event_detail="送信待ちが解消したため録音を再開します。",
+                    event_time=_now_iso(),
+                )
+        _cleanup_path(chunk.path)
+
+    def _is_paused(self, session: str) -> bool:
+        with self._queue_condition:
+            return self._paused_session == session
+
+    def _reset_generation(self, session: str | None) -> list[Path]:
+        with self._queue_condition:
+            self._generation += 1
+            self._next_chunk_sequence = 1
+            self._paused_session = None
+            cleanup_paths = [chunk.path for chunk in self._pending_chunks]
+            self._pending_chunks.clear()
+            self._queue_condition.notify_all()
+            return cleanup_paths
 
     def _notify_item(self, item: dict[str, object]) -> None:
         callback = self._item_callback
@@ -383,85 +493,6 @@ class TranscriptionService:
             return None
         normalized = session.strip()
         return normalized or None
-
-
-def _terminate_process(process: subprocess.Popen[str]) -> None:
-    stdin_stream = process.stdin
-    if stdin_stream is not None:
-        try:
-            stdin_stream.close()
-        except Exception:
-            pass
-    if process.poll() is not None:
-        return
-    try:
-        process.terminate()
-        process.wait(timeout=2.0)
-    except Exception:
-        try:
-            process.kill()
-        except Exception:
-            return
-
-
-def _read_transcript_row_count() -> int:
-    return len(_read_transcript_text_rows())
-
-
-def _read_new_transcript_rows(
-    processed_row_count: int,
-    session: str | None,
-) -> tuple[list[tuple[str, str]], int]:
-    rows = _read_transcript_text_rows()
-    row_count = len(rows)
-    if row_count < processed_row_count:
-        processed_row_count = row_count
-
-    if session is None:
-        return [], row_count
-
-    new_rows = [
-        (session, text)
-        for text in rows[processed_row_count:]
-        if text
-    ]
-    return new_rows, row_count
-
-
-def _read_transcript_text_rows() -> list[str]:
-    path = TRANSCRIPTION_CSV_PATH
-    if not path.is_file():
-        return []
-
-    texts: list[str] = []
-    try:
-        with path.open(
-            "r",
-            encoding="utf-8-sig",
-            errors="replace",
-            newline="",
-        ) as handle:
-            reader = csv.reader(handle)
-            for row in reader:
-                text = _text_from_transcript_row(row)
-                if text is not None:
-                    texts.append(text)
-    except OSError:
-        return []
-
-    return texts
-
-
-def _text_from_transcript_row(row: list[str]) -> str | None:
-    if len(row) < 2:
-        return None
-
-    spaced_text = row[1].strip()
-    normalized_text = row[2].strip() if len(row) >= 3 else ""
-    text = normalized_text or spaced_text
-    if not text:
-        return None
-    return text
 
 
 _service_lock = threading.Lock()
