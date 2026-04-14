@@ -107,7 +107,12 @@ def post_transcription_chunk(
 ) -> dict[str, object]:
     url = build_api_url("/api/transcription-chunks")
     try:
-        with open(audio_path, "rb") as audio_file:
+        audio_file = open(audio_path, "rb")
+    except OSError as exc:
+        raise BackendApiError(f"Failed to open audio chunk: {exc}") from exc
+
+    with audio_file:
+        try:
             response = requests.post(
                 url,
                 data={
@@ -121,10 +126,8 @@ def post_transcription_chunk(
                 },
                 timeout=BACKEND_UPLOAD_TIMEOUT_SEC,
             )
-    except OSError as exc:
-        raise BackendApiError(f"Failed to open audio chunk: {exc}") from exc
-    except requests.RequestException as exc:
-        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+        except requests.RequestException as exc:
+            raise BackendApiError(f"POST {url} failed: {exc}") from exc
 
     payload = _require_mapping(
         _parse_json_payload(response),
@@ -159,6 +162,7 @@ def normalize_comment_item(value: object) -> dict[str, object]:
     stamp = _require_nullable_string(payload.get("stamp"), "stamp")
     stamp_path = _require_nullable_string(payload.get("stampPath"), "stampPath")
     created_at = _require_string(payload.get("createdAt"), "createdAt")
+    source = _require_nullable_string(payload.get("source"), "source")
 
     return {
         "id": _require_int(payload.get("id"), "id"),
@@ -169,6 +173,7 @@ def normalize_comment_item(value: object) -> dict[str, object]:
         "time": _require_string(payload.get("time"), "time"),
         "stamp": stamp,
         "stamp_url": stamp_path,
+        "source": source,
         "created_at": created_at,
         "server_time_iso": created_at,
     }

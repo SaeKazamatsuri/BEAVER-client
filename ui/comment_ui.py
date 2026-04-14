@@ -4,6 +4,7 @@ import re
 import tkinter as tk
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import time
 
 SOFT_WRAP_MARKER = "\u200b"
 LONG_TOKEN_PATTERN = re.compile(r"[0-9A-Za-z_./:-]{32,}")
@@ -32,6 +33,7 @@ class CommentEntry:
     stamp_url: str | None
     created_at: str
     from_history: bool
+    source: str | None = None
 
 
 def insert_soft_wraps(text: str, chunk: int = 16) -> str:
@@ -66,6 +68,7 @@ def comment_entry_from_message(message: Mapping[str, object]) -> CommentEntry | 
         return None
 
     from_history = bool(message.get("_from_history", False))
+    source = _required_string(message.get("source")) if "source" in message else None
 
     return CommentEntry(
         id=entry_id,
@@ -76,6 +79,7 @@ def comment_entry_from_message(message: Mapping[str, object]) -> CommentEntry | 
         stamp_url=None,
         created_at=created_at,
         from_history=from_history,
+        source=source,
     )
 
 
@@ -218,6 +222,7 @@ def _draw_comment_card(
     card_top: int,
     card_right: int,
     tags: tuple[str, ...],
+    bg_color: str = CARD_BG,
 ) -> int:
     shadow_offset_x = 6
     shadow_offset_y = 6
@@ -286,7 +291,7 @@ def _draw_comment_card(
         card_right,
         card_bottom,
         radius=28,
-        fill=CARD_BG,
+        fill=bg_color,
         outline=CARD_BORDER,
         width=3,
         tags=tags,
@@ -390,6 +395,11 @@ class CommentListView(tk.Frame):
         self._comments: list[CommentEntry] = []
         self._redraw_scheduled = False
 
+        self._ai_question_entry: CommentEntry | None = None
+        self._ai_question_count: int = 0
+        self._ai_question_expiration: float = 0.0
+        self._ai_question_timer: str | None = None
+
         self._canvas = tk.Canvas(
             self,
             background=COMMENT_COLUMN_BG,
@@ -410,17 +420,55 @@ class CommentListView(tk.Frame):
 
     def clear(self) -> None:
         self._comments.clear()
+        self._ai_question_entry = None
+        self._ai_question_count = 0
+        if self._ai_question_timer:
+            self.after_cancel(self._ai_question_timer)
+            self._ai_question_timer = None
         self._canvas.delete("comment_card")
         self.after_idle(self._refresh_scrollregion)
 
     def set_comments(self, comments: Sequence[CommentEntry]) -> None:
-        self._comments = list(reversed(list(comments)))
+        filtered = []
+        for c in reversed(list(comments)):
+            if c.source == "ai_question":
+                continue
+            filtered.append(c)
+        self._comments = filtered
         self._schedule_redraw()
 
     def add_comment(self, comment: CommentEntry) -> None:
+        if comment.source == "ai_question" and not comment.from_history:
+            now = time.time()
+            if self._ai_question_entry is not None and now < self._ai_question_expiration:
+                self._ai_question_count += 1
+            else:
+                self._ai_question_count = 1
+            
+            self._ai_question_entry = comment
+            self._ai_question_expiration = now + 300.0  # 5分間
+            
+            if self._ai_question_timer:
+                self.after_cancel(self._ai_question_timer)
+            self._ai_question_timer = self.after(300000, self._expire_ai_question)
+            
+            self._schedule_redraw()
+            return
+
         self._comments.insert(0, comment)
         self._schedule_redraw()
         self.after_idle(lambda: self._canvas.yview_moveto(0.0))
+
+    def _expire_ai_question(self) -> None:
+        self._ai_question_entry = None
+        self._ai_question_timer = None
+        self._schedule_redraw()
+
+    def _get_ai_question_bg(self, count: int) -> str:
+        ratio = min((count - 1) / 10.0, 1.0)
+        g = int(255 - (255 - 128) * ratio)
+        b = int(255 - (255 - 223) * ratio)
+        return f"#ff{g:02x}{b:02x}"
 
     def _schedule_redraw(self) -> None:
         if self._redraw_scheduled:
@@ -445,6 +493,26 @@ class CommentListView(tk.Frame):
         card_left = 12
         current_y = 10
         card_right = max(card_left + 220, width - 18)
+
+        if self._ai_question_entry is not None:
+            bg_color = self._get_ai_question_bg(self._ai_question_count)
+            height = _draw_comment_card(
+                self._canvas,
+                self._ai_question_entry,
+                card_left=card_left,
+                card_top=current_y,
+                card_right=card_right,
+                tags=("comment_card",),
+                bg_color=bg_color,
+            )
+            current_y += height + 15
+            self._canvas.create_line(
+                card_left - 4, current_y - 8, card_right + 4, current_y - 8,
+                fill="#5aaecb",
+                width=2,
+                tags=("comment_card",)
+            )
+
         for entry in self._comments:
             height = _draw_comment_card(
                 self._canvas,
