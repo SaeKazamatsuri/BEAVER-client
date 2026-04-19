@@ -43,7 +43,8 @@ def main() -> None:
     start_transcription_service(
         lambda: state.CURRENT_SESSION if state.session_ready else None,
         state.record_transcription_service_update,
-        state.append_transcription_item,
+        None,
+        state.append_transcription_audio_waveform,
     )
 
     wrapper = tk.Frame(root, bg=COMMENT_COLUMN_BG)

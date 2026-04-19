@@ -1,16 +1,34 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import socket
+import ssl
 from collections.abc import Mapping, Sequence
 from urllib.parse import quote
 
 import requests
+from wsproto import WSConnection
+from wsproto.connection import ConnectionType
+from wsproto.events import (
+    AcceptConnection,
+    CloseConnection,
+    Ping,
+    RejectConnection,
+    RejectData,
+    Request,
+    TextMessage,
+)
 
 from config.constants import (
     BACKEND_BASE_URL,
     BACKEND_HTTP_TIMEOUT_SEC,
+    BACKEND_TRANSCRIPTION_WS_BASE_URL,
     BACKEND_UPLOAD_TIMEOUT_SEC,
     BACKEND_WS_BASE_URL,
+    BACKEND_WS_ORIGIN,
+    TRANSCRIPTION_WS_PART_SIZE_BYTES,
 )
 
 
@@ -26,6 +44,94 @@ def build_api_url(path: str) -> str:
 def build_ws_url(session: str) -> str:
     separator = "&" if "?" in BACKEND_WS_BASE_URL else "?"
     return f"{BACKEND_WS_BASE_URL}{separator}session={quote(session, safe='')}"
+
+
+def build_transcription_ws_url(session: str) -> str:
+    separator = "&" if "?" in BACKEND_TRANSCRIPTION_WS_BASE_URL else "?"
+    return f"{BACKEND_TRANSCRIPTION_WS_BASE_URL}{separator}session={quote(session, safe='')}"
+
+
+def upload_transcription_chunk_ws(
+    session: str,
+    chunk_sequence: int,
+    recorded_from: str,
+    recorded_to: str,
+    audio_bytes: bytes,
+) -> dict[str, object]:
+    if not audio_bytes:
+        raise BackendApiError("audio chunk is empty")
+
+    parts = [
+        audio_bytes[index : index + TRANSCRIPTION_WS_PART_SIZE_BYTES]
+        for index in range(0, len(audio_bytes), TRANSCRIPTION_WS_PART_SIZE_BYTES)
+    ]
+    if not parts:
+        raise BackendApiError("audio chunk is empty")
+
+    socket_handle, connection = _open_transcription_websocket(
+        build_transcription_ws_url(session)
+    )
+    try:
+        start_message = {
+            "type": "transcription.chunk.start",
+            "payload": {
+                "chunkSequence": chunk_sequence,
+                "recordedFrom": recorded_from,
+                "recordedTo": recorded_to,
+                "totalParts": len(parts),
+                "totalBytes": len(audio_bytes),
+                "audioSha256": _sha256_hex(audio_bytes),
+            },
+        }
+        _send_transcription_ws_json(socket_handle, connection, start_message)
+        start_payload = _extract_transcription_ws_payload(
+            _receive_transcription_ws_json(socket_handle, connection),
+            "transcription.chunk.start.ack",
+        )
+        if _require_int(start_payload.get("chunkSequence"), "chunkSequence") != chunk_sequence:
+            raise BackendApiError("transcription websocket start ack is invalid")
+
+        for part_sequence, part in enumerate(parts):
+            part_message = {
+                "type": "transcription.chunk.part",
+                "payload": {
+                    "chunkSequence": chunk_sequence,
+                    "partSequence": part_sequence,
+                    "audioBase64": base64.b64encode(part).decode("ascii"),
+                    "audioSha256": _sha256_hex(part),
+                },
+            }
+            _send_transcription_ws_json(socket_handle, connection, part_message)
+            part_payload = _extract_transcription_ws_payload(
+                _receive_transcription_ws_json(socket_handle, connection),
+                "transcription.chunk.part.ack",
+            )
+            if _require_int(part_payload.get("chunkSequence"), "chunkSequence") != chunk_sequence:
+                raise BackendApiError("transcription websocket part ack is invalid")
+            if _require_int(part_payload.get("partSequence"), "partSequence") != part_sequence:
+                raise BackendApiError("transcription websocket part ack is invalid")
+
+        finish_message = {
+            "type": "transcription.chunk.finish",
+            "payload": {
+                "chunkSequence": chunk_sequence,
+            },
+        }
+        _send_transcription_ws_json(socket_handle, connection, finish_message)
+        completed_payload = _extract_transcription_ws_payload(
+            _receive_transcription_ws_json(socket_handle, connection),
+            "transcription.chunk.completed",
+        )
+        if (
+            _require_int(completed_payload.get("chunkSequence"), "chunkSequence")
+            != chunk_sequence
+        ):
+            raise BackendApiError("transcription websocket completion is invalid")
+        return normalize_transcription_item(
+            completed_payload.get("transcription")
+        )
+    finally:
+        _close_transcription_websocket(socket_handle, connection)
 
 
 def fetch_bootstrap(raw_session: str) -> tuple[str, list[dict[str, object]]]:
@@ -139,6 +245,202 @@ def post_transcription_chunk(
             raise BackendApiError(error_message)
         raise BackendApiError(f"{response.status_code} {response.reason}")
     return normalize_transcription_item(payload)
+
+
+def _sha256_hex(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _open_transcription_websocket(url: str) -> tuple[socket.socket, WSConnection]:
+    parsed = requests.utils.urlparse(url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise BackendApiError("websocket host is invalid")
+
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "wss" else 80
+
+    try:
+        raw_socket = socket.create_connection(
+            (hostname, port),
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except OSError as exc:
+        raise BackendApiError(f"Failed to connect websocket: {exc}") from exc
+
+    raw_socket.settimeout(BACKEND_HTTP_TIMEOUT_SEC)
+    if parsed.scheme == "wss":
+        context = ssl.create_default_context()
+        socket_handle = context.wrap_socket(raw_socket, server_hostname=hostname)
+        socket_handle.settimeout(BACKEND_HTTP_TIMEOUT_SEC)
+    else:
+        socket_handle = raw_socket
+
+    target = parsed.path or "/"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+
+    connection = WSConnection(ConnectionType.CLIENT)
+    handshake = connection.send(
+        Request(
+            host=parsed.netloc,
+            target=target,
+            extra_headers=[(b"origin", BACKEND_WS_ORIGIN.encode("utf-8"))],
+        )
+    )
+    try:
+        socket_handle.sendall(handshake)
+    except OSError as exc:
+        try:
+            socket_handle.close()
+        except OSError:
+            pass
+        raise BackendApiError(f"Failed to send websocket handshake: {exc}") from exc
+
+    try:
+        _complete_transcription_websocket_handshake(socket_handle, connection)
+    except Exception:
+        try:
+            socket_handle.close()
+        except OSError:
+            pass
+        raise
+
+    return socket_handle, connection
+
+
+def _complete_transcription_websocket_handshake(
+    socket_handle: socket.socket,
+    connection: WSConnection,
+) -> None:
+    while True:
+        for event in _receive_transcription_ws_events(socket_handle, connection):
+            if isinstance(event, AcceptConnection):
+                return
+            if isinstance(event, RejectConnection):
+                raise BackendApiError(
+                    f"websocket rejected with status {event.status_code}"
+                )
+            if isinstance(event, RejectData):
+                continue
+            if isinstance(event, Ping):
+                _send_transcription_ws_event(socket_handle, connection, event.response())
+                continue
+            if isinstance(event, CloseConnection):
+                try:
+                    _send_transcription_ws_event(
+                        socket_handle, connection, event.response()
+                    )
+                except BackendApiError:
+                    pass
+                raise BackendApiError("websocket closed during handshake")
+
+
+def _send_transcription_ws_json(
+    socket_handle: socket.socket,
+    connection: WSConnection,
+    payload: Mapping[str, object],
+) -> None:
+    text = json.dumps(payload, separators=(",", ":"))
+    _send_transcription_ws_event(socket_handle, connection, TextMessage(data=text))
+
+
+def _send_transcription_ws_event(
+    socket_handle: socket.socket,
+    connection: WSConnection,
+    event: object,
+) -> None:
+    try:
+        socket_handle.sendall(connection.send(event))
+    except OSError as exc:
+        raise BackendApiError(f"WebSocket send failed: {exc}") from exc
+
+
+def _receive_transcription_ws_json(
+    socket_handle: socket.socket,
+    connection: WSConnection,
+) -> Mapping[str, object]:
+    message_parts: list[str] = []
+    while True:
+        for event in _receive_transcription_ws_events(socket_handle, connection):
+            if isinstance(event, TextMessage):
+                message_parts.append(event.data)
+                if not event.message_finished:
+                    continue
+                try:
+                    payload = json.loads("".join(message_parts))
+                except json.JSONDecodeError as exc:
+                    raise BackendApiError("transcription websocket response is invalid") from exc
+                return _require_mapping(payload, "transcription websocket response")
+            if isinstance(event, Ping):
+                _send_transcription_ws_event(socket_handle, connection, event.response())
+                continue
+            if isinstance(event, RejectConnection):
+                raise BackendApiError(
+                    f"websocket rejected with status {event.status_code}"
+                )
+            if isinstance(event, RejectData):
+                continue
+            if isinstance(event, CloseConnection):
+                try:
+                    _send_transcription_ws_event(
+                        socket_handle, connection, event.response()
+                    )
+                except BackendApiError:
+                    pass
+                raise BackendApiError("transcription websocket closed unexpectedly")
+            if isinstance(event, AcceptConnection):
+                continue
+
+
+def _receive_transcription_ws_events(
+    socket_handle: socket.socket,
+    connection: WSConnection,
+):
+    try:
+        received = socket_handle.recv(4096)
+    except socket.timeout as exc:
+        raise BackendApiError("transcription websocket timed out") from exc
+    except OSError as exc:
+        raise BackendApiError(f"WebSocket receive failed: {exc}") from exc
+
+    if not received:
+        connection.receive_data(None)
+    else:
+        connection.receive_data(received)
+    return connection.events()
+
+
+def _extract_transcription_ws_payload(
+    message: Mapping[str, object],
+    expected_type: str,
+) -> Mapping[str, object]:
+    message_type = _require_string(message.get("type"), "type")
+    payload = _require_mapping(message.get("payload"), "payload")
+    if message_type == "transcription.chunk.error":
+        raise BackendApiError(_require_string(payload.get("message"), "message"))
+    if message_type != expected_type:
+        raise BackendApiError(
+            f"Unexpected transcription websocket response: {message_type}"
+        )
+    return payload
+
+
+def _close_transcription_websocket(
+    socket_handle: socket.socket,
+    connection: WSConnection,
+) -> None:
+    try:
+        close_bytes = connection.send(CloseConnection(code=1000, reason=""))
+        if close_bytes:
+            socket_handle.sendall(close_bytes)
+    except Exception:
+        pass
+    try:
+        socket_handle.close()
+    except OSError:
+        pass
 
 
 def parse_comment_event(raw_message: str) -> dict[str, object] | None:

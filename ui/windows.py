@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Callable, Sequence
+from typing import Protocol
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -43,6 +44,20 @@ def set_always_on_top(hwnd: int) -> None:
     )
 
 
+class CommentWindowVisibilityTarget(Protocol):
+    def withdraw(self) -> object:
+        ...
+
+    def deiconify(self) -> object:
+        ...
+
+    def attributes(self, *args: object) -> object:
+        ...
+
+    def winfo_id(self) -> int:
+        ...
+
+
 def _default_export_filename(extension: str) -> str:
     session_name = _string_value(getattr(state, "CURRENT_SESSION", "")).strip()
     if not session_name:
@@ -50,6 +65,35 @@ def _default_export_filename(extension: str) -> str:
         if menu_session_var is not None:
             session_name = menu_session_var.get().strip()
     return build_export_filename(session_name, extension)
+
+
+def _comment_toggle_button_text(hidden: bool) -> str:
+    if hidden:
+        return "コメント欄再表示"
+    return "コメント欄非表示"
+
+
+def toggle_comment_window_visibility(
+    target: CommentWindowVisibilityTarget,
+    *,
+    hidden: bool,
+    refresh_layout_callback: Callable[[], None],
+) -> bool:
+    if hidden:
+        refresh_layout_callback()
+        target.deiconify()
+        try:
+            target.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        try:
+            set_always_on_top(target.winfo_id())
+        except (tk.TclError, RuntimeError):
+            pass
+        return False
+
+    target.withdraw()
+    return True
 
 
 def _focus_existing_window(window: tk.Toplevel | None) -> bool:
@@ -213,6 +257,63 @@ def _render_card_list(
             pady=10,
             font=admin_theme.BODY_FONT,
         ).pack(fill="x")
+
+
+def _render_transcription_waveform(
+    canvas: tk.Canvas,
+    points: Sequence[float],
+) -> None:
+    if not canvas.winfo_exists():
+        return
+
+    canvas.delete("all")
+    width = max(int(canvas.winfo_width()), 640)
+    height = max(int(canvas.winfo_height()), int(canvas.cget("height")), 110)
+    mid_y = height / 2.0
+
+    canvas.create_line(
+        0,
+        mid_y,
+        width,
+        mid_y,
+        fill=admin_theme.BORDER_COLOR,
+        width=1,
+    )
+
+    if not points:
+        canvas.create_text(
+            width / 2.0,
+            mid_y,
+            text="マイク入力待機中",
+            fill=admin_theme.MUTED_TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+        )
+        return
+
+    if len(points) == 1:
+        y = mid_y - (float(points[0]) * (height * 0.42))
+        canvas.create_line(
+            0,
+            y,
+            width,
+            y,
+            fill="#0f766e",
+            width=2,
+            smooth=True,
+        )
+        return
+
+    x_step = width / float(len(points) - 1)
+    coordinates: list[float] = []
+    for index, point in enumerate(points):
+        coordinates.append(index * x_step)
+        coordinates.append(mid_y - (float(point) * (height * 0.42)))
+    canvas.create_line(
+        *coordinates,
+        fill="#0f766e",
+        width=2,
+        smooth=True,
+    )
 
 
 def _render_comment_history_rows(
@@ -425,6 +526,38 @@ def _open_transcription_history_window(root_ref: tk.Tk) -> None:
         font=admin_theme.SMALL_FONT,
     ).pack(fill="x")
 
+    _create_section_label(wrapper, "マイク入力")
+    waveform_card = admin_theme.create_card(wrapper)
+    waveform_card.pack(fill="x", pady=(10, 14))
+
+    waveform_state_var = tk.StringVar(value="入力待機中")
+    tk.Label(
+        waveform_card,
+        text="PCマイクの入力波形",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.CARD_TITLE_FONT,
+        anchor="w",
+    ).pack(fill="x")
+    tk.Label(
+        waveform_card,
+        textvariable=waveform_state_var,
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+        pady=6,
+    ).pack(fill="x")
+    waveform_canvas = tk.Canvas(
+        waveform_card,
+        bg="#f8fafc",
+        highlightbackground=admin_theme.BORDER_COLOR,
+        highlightthickness=1,
+        bd=0,
+        height=110,
+    )
+    waveform_canvas.pack(fill="x")
+
     _create_section_label(wrapper, "タイムライン")
     timeline_frame, content = admin_theme.create_scrollable_panel(
         wrapper,
@@ -433,6 +566,23 @@ def _open_transcription_history_window(root_ref: tk.Tk) -> None:
     timeline_frame.pack(expand=True, fill="both", pady=(10, 0))
 
     last_signature: list[object | None] = [None]
+    last_waveform_signature: list[tuple[float, ...] | None] = [None]
+
+    def refresh_waveform() -> None:
+        if not win.winfo_exists():
+            return
+
+        points = state.snapshot_transcription_audio_waveform()
+        visible_points = points[-240:]
+        rounded_signature = tuple(round(point, 3) for point in visible_points)
+        if rounded_signature != last_waveform_signature[0]:
+            _render_transcription_waveform(waveform_canvas, visible_points)
+            recent_peak = max((abs(point) for point in visible_points[-64:]), default=0.0)
+            waveform_state_var.set(
+                "入力を検出しています" if recent_peak >= 0.05 else "入力待機中"
+            )
+            last_waveform_signature[0] = rounded_signature
+        win.after(100, refresh_waveform)
 
     def refresh() -> None:
         if not win.winfo_exists():
@@ -500,6 +650,7 @@ def _open_transcription_history_window(root_ref: tk.Tk) -> None:
 
         win.after(500, refresh)
 
+    refresh_waveform()
     refresh()
 
 
@@ -701,7 +852,7 @@ def create_menu_window(
 
     wrapper = admin_theme.create_window_shell(
         menu,
-        geometry="430x420",
+        geometry="430x470",
         topmost=True,
     )
 
@@ -825,6 +976,27 @@ def create_menu_window(
             disconnect_session(show_status=False)
             stop_transcription_service()
             root_ref.destroy()
+
+    comment_window_hidden = [False]
+
+    def toggle_comment_visibility() -> None:
+        comment_window_hidden[0] = toggle_comment_window_visibility(
+            root_ref,
+            hidden=comment_window_hidden[0],
+            refresh_layout_callback=refresh_layout_callback,
+        )
+        if toggle_comment_button.winfo_exists():
+            toggle_comment_button.configure(
+                text=_comment_toggle_button_text(comment_window_hidden[0])
+            )
+
+    toggle_comment_button = admin_theme.create_button(
+        buttons,
+        text=_comment_toggle_button_text(comment_window_hidden[0]),
+        command=toggle_comment_visibility,
+        variant="primary",
+    )
+    toggle_comment_button.pack(fill="x", pady=(2, 8))
 
     admin_theme.create_button(
         buttons,

@@ -4,10 +4,12 @@ import re
 import tkinter as tk
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 import time
 
 SOFT_WRAP_MARKER = "\u200b"
 LONG_TOKEN_PATTERN = re.compile(r"[0-9A-Za-z_./:-]{32,}")
+AI_QUESTION_LIFETIME_SEC = 300.0
 
 COMMENT_COLUMN_BG = "#6dd3f7"
 CARD_BG = "#ffffff"
@@ -95,6 +97,49 @@ def _required_string(value: object) -> str | None:
     if isinstance(value, str):
         return value
     return None
+
+
+def _created_at_to_seconds(value: str) -> float | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _is_same_ai_question(current: CommentEntry, incoming: CommentEntry) -> bool:
+    return current.text == incoming.text
+
+
+def _extract_ai_question_state(
+    comments: Sequence[CommentEntry],
+    *,
+    now: float | None = None,
+) -> tuple[CommentEntry | None, int, float]:
+    active_entry: CommentEntry | None = None
+    active_count = 0
+    active_expiration = 0.0
+
+    for entry in comments:
+        if entry.source != "ai_question":
+            continue
+        created_at_seconds = _created_at_to_seconds(entry.created_at)
+        if created_at_seconds is None:
+            continue
+        if (
+            active_entry is not None
+            and created_at_seconds < active_expiration
+            and _is_same_ai_question(active_entry, entry)
+        ):
+            active_count += 1
+        else:
+            active_count = 1
+        active_entry = entry
+        active_expiration = created_at_seconds + AI_QUESTION_LIFETIME_SEC
+
+    current_time = time.time() if now is None else now
+    if active_entry is None or current_time >= active_expiration:
+        return None, 0, 0.0
+    return active_entry, active_count, active_expiration
 
 
 def _bbox_or_default(
@@ -400,6 +445,16 @@ class CommentListView(tk.Frame):
         self._ai_question_expiration: float = 0.0
         self._ai_question_timer: str | None = None
 
+        self._header_canvas = tk.Canvas(
+            self,
+            background=COMMENT_COLUMN_BG,
+            borderwidth=0,
+            highlightthickness=0,
+            relief="flat",
+            height=0,
+        )
+        self._header_canvas.pack(fill="x")
+
         self._canvas = tk.Canvas(
             self,
             background=COMMENT_COLUMN_BG,
@@ -412,6 +467,9 @@ class CommentListView(tk.Frame):
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)
         self._canvas.bind("<Button-4>", self._on_mousewheel_linux)
         self._canvas.bind("<Button-5>", self._on_mousewheel_linux)
+        self._header_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self._header_canvas.bind("<Button-4>", self._on_mousewheel_linux)
+        self._header_canvas.bind("<Button-5>", self._on_mousewheel_linux)
         self.after_idle(self._redraw)
 
     @property
@@ -420,15 +478,20 @@ class CommentListView(tk.Frame):
 
     def clear(self) -> None:
         self._comments.clear()
-        self._ai_question_entry = None
-        self._ai_question_count = 0
-        if self._ai_question_timer:
-            self.after_cancel(self._ai_question_timer)
-            self._ai_question_timer = None
+        self._reset_ai_question_state()
         self._canvas.delete("comment_card")
+        self._header_canvas.delete("ai_question_card")
+        self._header_canvas.configure(height=0)
         self.after_idle(self._refresh_scrollregion)
 
     def set_comments(self, comments: Sequence[CommentEntry]) -> None:
+        now = time.time()
+        (
+            self._ai_question_entry,
+            self._ai_question_count,
+            self._ai_question_expiration,
+        ) = _extract_ai_question_state(comments, now=now)
+        self._schedule_ai_question_timer(now=now)
         filtered = []
         for c in reversed(list(comments)):
             if c.source == "ai_question":
@@ -440,18 +503,18 @@ class CommentListView(tk.Frame):
     def add_comment(self, comment: CommentEntry) -> None:
         if comment.source == "ai_question" and not comment.from_history:
             now = time.time()
-            if self._ai_question_entry is not None and now < self._ai_question_expiration:
+            if (
+                self._ai_question_entry is not None
+                and now < self._ai_question_expiration
+                and _is_same_ai_question(self._ai_question_entry, comment)
+            ):
                 self._ai_question_count += 1
             else:
                 self._ai_question_count = 1
-            
+
             self._ai_question_entry = comment
-            self._ai_question_expiration = now + 300.0  # 5分間
-            
-            if self._ai_question_timer:
-                self.after_cancel(self._ai_question_timer)
-            self._ai_question_timer = self.after(300000, self._expire_ai_question)
-            
+            self._ai_question_expiration = now + AI_QUESTION_LIFETIME_SEC
+            self._schedule_ai_question_timer(now=now)
             self._schedule_redraw()
             return
 
@@ -460,9 +523,38 @@ class CommentListView(tk.Frame):
         self.after_idle(lambda: self._canvas.yview_moveto(0.0))
 
     def _expire_ai_question(self) -> None:
-        self._ai_question_entry = None
-        self._ai_question_timer = None
+        self._reset_ai_question_state()
         self._schedule_redraw()
+
+    def _reset_ai_question_state(self) -> None:
+        if self._ai_question_timer:
+            try:
+                self.after_cancel(self._ai_question_timer)
+            except tk.TclError:
+                pass
+        self._ai_question_entry = None
+        self._ai_question_count = 0
+        self._ai_question_expiration = 0.0
+        self._ai_question_timer = None
+
+    def _schedule_ai_question_timer(self, *, now: float | None = None) -> None:
+        if self._ai_question_timer:
+            try:
+                self.after_cancel(self._ai_question_timer)
+            except tk.TclError:
+                pass
+            self._ai_question_timer = None
+        if self._ai_question_entry is None:
+            return
+        current_time = time.time() if now is None else now
+        remaining_seconds = self._ai_question_expiration - current_time
+        if remaining_seconds <= 0.0:
+            self._ai_question_entry = None
+            self._ai_question_count = 0
+            self._ai_question_expiration = 0.0
+            return
+        delay_ms = max(1, int(remaining_seconds * 1000))
+        self._ai_question_timer = self.after(delay_ms, self._expire_ai_question)
 
     def _get_ai_question_bg(self, count: int) -> str:
         ratio = min((count - 1) / 10.0, 1.0)
@@ -488,30 +580,13 @@ class CommentListView(tk.Frame):
             self.after(10, self._schedule_redraw)
             return
 
+        self._redraw_ai_question(width)
+
         self._canvas.delete("comment_card")
 
         card_left = 12
         current_y = 10
         card_right = max(card_left + 220, width - 18)
-
-        if self._ai_question_entry is not None:
-            bg_color = self._get_ai_question_bg(self._ai_question_count)
-            height = _draw_comment_card(
-                self._canvas,
-                self._ai_question_entry,
-                card_left=card_left,
-                card_top=current_y,
-                card_right=card_right,
-                tags=("comment_card",),
-                bg_color=bg_color,
-            )
-            current_y += height + 15
-            self._canvas.create_line(
-                card_left - 4, current_y - 8, card_right + 4, current_y - 8,
-                fill="#5aaecb",
-                width=2,
-                tags=("comment_card",)
-            )
 
         for entry in self._comments:
             height = _draw_comment_card(
@@ -530,6 +605,41 @@ class CommentListView(tk.Frame):
             self._canvas.tag_lower("comment_card", "overlay_balloon")
         else:
             self._canvas.tag_lower("comment_card")
+
+    def _redraw_ai_question(self, width: int) -> None:
+        self._header_canvas.delete("ai_question_card")
+        if self._ai_question_entry is None:
+            self._header_canvas.configure(height=0)
+            return
+
+        card_left = 12
+        card_top = 10
+        card_right = max(card_left + 220, width - 18)
+        bg_color = self._get_ai_question_bg(self._ai_question_count)
+        height = _draw_comment_card(
+            self._header_canvas,
+            self._ai_question_entry,
+            card_left=card_left,
+            card_top=card_top,
+            card_right=card_right,
+            tags=("ai_question_card",),
+            bg_color=bg_color,
+        )
+        separator_y = card_top + height + 7
+        self._header_canvas.create_line(
+            card_left - 4,
+            separator_y,
+            card_right + 4,
+            separator_y,
+            fill="#5aaecb",
+            width=2,
+            tags=("ai_question_card",),
+        )
+        header_height = separator_y + 8
+        self._header_canvas.configure(
+            height=header_height,
+            scrollregion=(0, 0, max(width, card_right + 12), header_height),
+        )
 
     def _refresh_scrollregion(self) -> None:
         bbox = self._canvas.bbox("comment_card")

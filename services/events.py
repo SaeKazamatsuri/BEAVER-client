@@ -4,6 +4,7 @@ import queue
 import socket
 import ssl
 import threading
+import time
 from urllib.parse import urlsplit
 from tkinter import messagebox
 
@@ -34,6 +35,7 @@ _connection_lock = threading.Lock()
 _connection_serial = 0
 _active_socket: socket.socket | None = None
 _active_stop_event: threading.Event | None = None
+_TRANSCRIPTION_POLL_INTERVAL_SEC = 1.0
 
 
 def _on_history(data):
@@ -84,6 +86,16 @@ def _clear_message_queue() -> None:
             state.message_queue.get_nowait()
         except queue.Empty:
             return
+
+
+def _refresh_transcriptions(session: str) -> None:
+    try:
+        transcriptions = fetch_transcriptions(session)
+    except BackendApiError:
+        return
+    except Exception:
+        return
+    state.replace_transcription_items(transcriptions)
 
 
 def _set_active_socket(
@@ -265,6 +277,21 @@ def _run_websocket(session: str, serial: int, stop_event: threading.Event) -> No
             break
 
 
+def _run_transcription_polling(
+    session: str,
+    serial: int,
+    stop_event: threading.Event,
+) -> None:
+    last_polled_at = 0.0
+    while not stop_event.is_set() and _is_current_serial(serial):
+        now = time.monotonic()
+        if now - last_polled_at >= _TRANSCRIPTION_POLL_INTERVAL_SEC:
+            _refresh_transcriptions(session)
+            last_polled_at = now
+        if stop_event.wait(0.2):
+            return
+
+
 def connect_session(session_name: str):
     serial = _next_connection_serial()
 
@@ -282,13 +309,7 @@ def connect_session(session_name: str):
             state.CURRENT_SESSION = normalized_session
             state.session_ready = True
             state.set_transcription_session(normalized_session)
-            try:
-                transcriptions = fetch_transcriptions(normalized_session)
-            except BackendApiError:
-                transcriptions = []
-            except Exception:
-                transcriptions = []
-            state.replace_transcription_items(transcriptions)
+            _refresh_transcriptions(normalized_session)
             _on_history(messages)
             state.safe_set(
                 state.menu_current_session_var,
@@ -305,6 +326,11 @@ def connect_session(session_name: str):
                 _active_stop_event = stop_event
             threading.Thread(
                 target=_run_websocket,
+                args=(normalized_session, serial, stop_event),
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=_run_transcription_polling,
                 args=(normalized_session, serial, stop_event),
                 daemon=True,
             ).start()

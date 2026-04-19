@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import struct
 import threading
 import time
 import wave
@@ -7,7 +9,6 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 from config.constants import (
     TRANSCRIPTION_BACKLOG_LIMIT,
@@ -16,9 +17,8 @@ from config.constants import (
     TRANSCRIPTION_READ_FRAMES,
     TRANSCRIPTION_SAMPLE_RATE_HZ,
     TRANSCRIPTION_SAMPLE_WIDTH_BYTES,
-    TRANSCRIPTION_TEMP_DIR,
 )
-from services.backend_api import post_transcription_chunk
+from services.backend_api import upload_transcription_chunk_ws
 
 try:
     import sounddevice
@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - exercised through runtime guard
 
 StatusCallback = Callable[[dict[str, object], dict[str, object] | None], None]
 ItemCallback = Callable[[dict[str, object]], None]
+WaveformCallback = Callable[[list[float]], None]
 
 _MISSING = object()
 
@@ -38,7 +39,7 @@ class PendingChunk:
     chunk_sequence: int
     recorded_from: str
     recorded_to: str
-    path: Path
+    audio_bytes: bytes
     retry_count: int = 0
     next_attempt_at: float = 0.0
 
@@ -51,13 +52,6 @@ def _now_iso() -> str:
     )
 
 
-def _cleanup_path(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        return
-
-
 def _retry_delay_seconds(retry_count: int) -> float:
     return min(60.0, float(2 ** min(retry_count, 5)))
 
@@ -68,10 +62,12 @@ class TranscriptionService:
         session_provider: Callable[[], str | None],
         status_callback: StatusCallback | None,
         item_callback: ItemCallback | None,
+        waveform_callback: WaveformCallback | None,
     ) -> None:
         self._session_provider = session_provider
         self._status_callback = status_callback
         self._item_callback = item_callback
+        self._waveform_callback = waveform_callback
         self._stop_event = threading.Event()
         self._controller_thread: threading.Thread | None = None
         self._uploader_thread: threading.Thread | None = None
@@ -114,7 +110,6 @@ class TranscriptionService:
             event_detail="録音サービスを起動しています。",
             event_time=started_at,
         )
-        TRANSCRIPTION_TEMP_DIR.mkdir(parents=True, exist_ok=True)
         controller_thread = self._controller_thread
         uploader_thread = self._uploader_thread
         if controller_thread is not None:
@@ -134,9 +129,7 @@ class TranscriptionService:
         if uploader_thread is not None:
             uploader_thread.join(timeout=3.0)
 
-        cleanup_paths = self._reset_generation(None)
-        for path in cleanup_paths:
-            _cleanup_path(path)
+        self._reset_generation(None)
 
         with self._lock:
             self._controller_thread = None
@@ -160,9 +153,7 @@ class TranscriptionService:
             session = self._current_session()
             if session is None:
                 if active_session is not None:
-                    cleanup_paths = self._reset_generation(None)
-                    for path in cleanup_paths:
-                        _cleanup_path(path)
+                    self._reset_generation(None)
                     active_session = None
                 if not last_idle_published:
                     self._publish_status(
@@ -178,9 +169,7 @@ class TranscriptionService:
                 continue
 
             if session != active_session:
-                cleanup_paths = self._reset_generation(session)
-                for path in cleanup_paths:
-                    _cleanup_path(path)
+                self._reset_generation(session)
                 active_session = session
                 last_idle_published = False
                 self._publish_status(
@@ -190,7 +179,7 @@ class TranscriptionService:
                     last_error_at=None,
                     last_error_message=None,
                     event_name="録音開始",
-                    event_detail="2分チャンク録音を開始しました。",
+                    event_detail="3分チャンク録音を開始しました。",
                     event_time=_now_iso(),
                 )
 
@@ -220,7 +209,6 @@ class TranscriptionService:
 
             overflowed = self._enqueue_chunk(completed_chunk)
             if overflowed:
-                _cleanup_path(completed_chunk.path)
                 self._publish_status(
                     state="error",
                     process_alive=False,
@@ -238,7 +226,7 @@ class TranscriptionService:
                 process_alive=True,
                 session=session,
                 event_name="録音完了",
-                event_detail="2分音声を送信キューへ追加しました。",
+                event_detail="3分音声を送信キューへ追加しました。",
                 event_time=completed_chunk.recorded_to,
             )
 
@@ -258,12 +246,12 @@ class TranscriptionService:
             )
 
             try:
-                item = post_transcription_chunk(
+                item = upload_transcription_chunk_ws(
                     chunk.session,
                     chunk.chunk_sequence,
                     chunk.recorded_from,
                     chunk.recorded_to,
-                    str(chunk.path),
+                    chunk.audio_bytes,
                 )
             except Exception as exc:
                 self._mark_chunk_retry(chunk, str(exc))
@@ -286,12 +274,12 @@ class TranscriptionService:
 
     def _record_chunk(self, session: str) -> PendingChunk | None:
         generation, chunk_sequence = self._snapshot_recording_state(session)
-        path = TRANSCRIPTION_TEMP_DIR / f"{session}-{generation}-{chunk_sequence}.wav"
         recorded_from = _now_iso()
         deadline = time.monotonic() + TRANSCRIPTION_CHUNK_DURATION_SEC
+        buffer = io.BytesIO()
 
         with self._create_stream() as stream:
-            with wave.open(str(path), "wb") as wav_file:
+            with wave.open(buffer, "wb") as wav_file:
                 wav_file.setnchannels(TRANSCRIPTION_CHANNELS)
                 wav_file.setsampwidth(TRANSCRIPTION_SAMPLE_WIDTH_BYTES)
                 wav_file.setframerate(TRANSCRIPTION_SAMPLE_RATE_HZ)
@@ -299,20 +287,18 @@ class TranscriptionService:
                 while not self._stop_event.is_set():
                     current_session = self._current_session()
                     if current_session != session:
-                        _cleanup_path(path)
                         return None
                     if self._is_generation_stale(generation, session):
-                        _cleanup_path(path)
                         return None
 
                     audio_bytes, _overflowed = stream.read(TRANSCRIPTION_READ_FRAMES)
                     wav_file.writeframes(audio_bytes)
+                    self._notify_waveform(audio_bytes)
 
                     if time.monotonic() >= deadline:
                         break
 
         if self._stop_event.is_set() or self._current_session() != session:
-            _cleanup_path(path)
             return None
 
         recorded_to = _now_iso()
@@ -322,7 +308,7 @@ class TranscriptionService:
             chunk_sequence=chunk_sequence,
             recorded_from=recorded_from,
             recorded_to=recorded_to,
-            path=path,
+            audio_bytes=buffer.getvalue(),
         )
 
     def _create_stream(self):
@@ -365,8 +351,7 @@ class TranscriptionService:
                     continue
                 chunk = self._pending_chunks[0]
                 if chunk.generation != self._generation:
-                    stale_chunk = self._pending_chunks.popleft()
-                    _cleanup_path(stale_chunk.path)
+                    self._pending_chunks.popleft()
                     continue
                 now = time.monotonic()
                 if chunk.next_attempt_at > now:
@@ -412,21 +397,18 @@ class TranscriptionService:
                     event_detail="送信待ちが解消したため録音を再開します。",
                     event_time=_now_iso(),
                 )
-        _cleanup_path(chunk.path)
 
     def _is_paused(self, session: str) -> bool:
         with self._queue_condition:
             return self._paused_session == session
 
-    def _reset_generation(self, session: str | None) -> list[Path]:
+    def _reset_generation(self, session: str | None) -> None:
         with self._queue_condition:
             self._generation += 1
             self._next_chunk_sequence = 1
             self._paused_session = None
-            cleanup_paths = [chunk.path for chunk in self._pending_chunks]
             self._pending_chunks.clear()
             self._queue_condition.notify_all()
-            return cleanup_paths
 
     def _notify_item(self, item: dict[str, object]) -> None:
         callback = self._item_callback
@@ -434,6 +416,18 @@ class TranscriptionService:
             return
         try:
             callback(dict(item))
+        except Exception:
+            return
+
+    def _notify_waveform(self, audio_bytes: bytes) -> None:
+        callback = self._waveform_callback
+        if callback is None:
+            return
+        points = _sample_waveform_points(audio_bytes)
+        if not points:
+            return
+        try:
+            callback(points)
         except Exception:
             return
 
@@ -499,10 +493,39 @@ _service_lock = threading.Lock()
 _service: TranscriptionService | None = None
 
 
+def _sample_waveform_points(audio_bytes: bytes, max_points: int = 48) -> list[float]:
+    if max_points <= 0:
+        return []
+    sample_count = len(audio_bytes) // TRANSCRIPTION_SAMPLE_WIDTH_BYTES
+    if sample_count <= 0:
+        return []
+
+    samples = [
+        sample[0]
+        for sample in struct.iter_unpack(
+            "<h",
+            audio_bytes[: sample_count * TRANSCRIPTION_SAMPLE_WIDTH_BYTES],
+        )
+    ]
+    if not samples:
+        return []
+
+    if len(samples) <= max_points:
+        selected = samples
+    else:
+        step = len(samples) / float(max_points)
+        selected = [
+            samples[min(int(index * step), len(samples) - 1)]
+            for index in range(max_points)
+        ]
+    return [max(-1.0, min(1.0, sample / 32768.0)) for sample in selected]
+
+
 def start_transcription_service(
     session_provider: Callable[[], str | None],
     status_callback: StatusCallback | None = None,
     item_callback: ItemCallback | None = None,
+    waveform_callback: WaveformCallback | None = None,
 ) -> None:
     global _service
     with _service_lock:
@@ -511,6 +534,7 @@ def start_transcription_service(
                 session_provider,
                 status_callback,
                 item_callback,
+                waveform_callback,
             )
         _service.start()
 

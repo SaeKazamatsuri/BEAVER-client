@@ -81,6 +81,15 @@ transcription_status: dict[str, object] = {
     "last_error_at": None,
     "last_error_message": None,
 }
+transcription_audio_waveform: deque[float] = deque(maxlen=512)
+_HIDDEN_TRANSCRIPTION_EVENT_NAMES = {
+    "録音完了",
+    "送信開始",
+    "送信失敗",
+    "保存完了",
+    "録音再開",
+    "待機超過",
+}
 
 
 def clear_messages() -> None:
@@ -158,6 +167,7 @@ def set_transcription_session(session: str | None) -> None:
         state_value = str(transcription_status.get("state", "idle"))
         transcription_items.clear()
         transcription_events.clear()
+        transcription_audio_waveform.clear()
         transcription_status["session"] = normalized_session
         transcription_status["last_success_at"] = None
         if state_value != "error":
@@ -198,6 +208,20 @@ def append_transcription_item(item: dict[str, object]) -> None:
         transcription_items.sort(key=lambda entry: int(entry.get("id", 0)))
 
 
+def append_transcription_audio_waveform(points: list[float]) -> None:
+    if not points:
+        return
+    with _transcription_lock:
+        transcription_audio_waveform.extend(
+            max(-1.0, min(1.0, float(point))) for point in points
+        )
+
+
+def snapshot_transcription_audio_waveform() -> list[float]:
+    with _transcription_lock:
+        return list(transcription_audio_waveform)
+
+
 def record_transcription_service_update(
     snapshot: dict[str, object],
     event: dict[str, object] | None,
@@ -223,7 +247,9 @@ def record_transcription_service_update(
         if event is not None:
             event_copy = dict(event)
             event_copy["session"] = str(event_copy.get("session", "") or "")
-            transcription_events.append(event_copy)
+            event_name = _optional_string(event_copy.get("event"))
+            if event_name not in _HIDDEN_TRANSCRIPTION_EVENT_NAMES:
+                transcription_events.append(event_copy)
 
 
 def snapshot_transcription_history() -> tuple[

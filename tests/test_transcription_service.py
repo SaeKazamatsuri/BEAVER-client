@@ -1,24 +1,24 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import threading
 import time
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 backend_api_stub = types.ModuleType("services.backend_api")
 
 
-def _post_transcription_chunk_stub(
+def _upload_transcription_chunk_ws_stub(
     session: str,
     chunk_sequence: int,
     recorded_from: str,
     recorded_to: str,
-    audio_path: str,
+    audio_bytes: bytes,
 ) -> dict[str, object]:
+    if not audio_bytes.startswith(b"RIFF"):
+        raise AssertionError("audio bytes must be WAV data")
     return {
         "id": chunk_sequence,
         "session": session,
@@ -27,7 +27,7 @@ def _post_transcription_chunk_stub(
     }
 
 
-backend_api_stub.post_transcription_chunk = _post_transcription_chunk_stub
+backend_api_stub.upload_transcription_chunk_ws = _upload_transcription_chunk_ws_stub
 
 with patch.dict(sys.modules, {"services.backend_api": backend_api_stub}):
     from services import transcription_service
@@ -60,79 +60,77 @@ class TranscriptionServiceTests(unittest.TestCase):
         def item_callback(item: dict[str, object]) -> None:
             items.append(item)
 
-        service = TranscriptionService(lambda: "demo", status_callback, item_callback)
+        service = TranscriptionService(
+            lambda: "demo",
+            status_callback,
+            item_callback,
+            None,
+        )
         return service, items, events
 
     def test_record_chunk_rotates_to_wav_file(self) -> None:
         service, _items, _events = self._build_service()
-        cleanup_paths = service._reset_generation("demo")
-        self.assertEqual(cleanup_paths, [])
+        service._reset_generation("demo")
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.object(transcription_service, "TRANSCRIPTION_TEMP_DIR", Path(temp_dir)), patch.object(
-                service,
-                "_create_stream",
-                return_value=_FakeStream([b"\x01\x02\x03\x04"]),
-            ), patch.object(
-                transcription_service.time,
-                "monotonic",
-                side_effect=[0.0, 121.0],
-            ):
-                chunk = service._record_chunk("demo")
+        with patch.object(
+            service,
+            "_create_stream",
+            return_value=_FakeStream([b"\x01\x02\x03\x04"]),
+        ), patch.object(
+            transcription_service.time,
+            "monotonic",
+            side_effect=[0.0, 181.0],
+        ):
+            chunk = service._record_chunk("demo")
 
         self.assertIsNotNone(chunk)
         assert chunk is not None
         self.assertEqual(chunk.session, "demo")
         self.assertEqual(chunk.chunk_sequence, 1)
-        self.assertTrue(chunk.path.name.endswith(".wav"))
+        self.assertTrue(chunk.audio_bytes.startswith(b"RIFF"))
+        self.assertIn(b"WAVE", chunk.audio_bytes)
 
     def test_reset_generation_clears_pending_chunks_and_sequence(self) -> None:
         service, _items, _events = self._build_service()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            stale_path = Path(temp_dir) / "stale.wav"
-            stale_path.write_bytes(b"stale")
-            service._enqueue_chunk(
-                PendingChunk(
-                    generation=0,
-                    session="demo",
-                    chunk_sequence=1,
-                    recorded_from="2026-04-15T00:00:00Z",
-                    recorded_to="2026-04-15T00:02:00Z",
-                    path=stale_path,
-                )
+        service._enqueue_chunk(
+            PendingChunk(
+                generation=0,
+                session="demo",
+                chunk_sequence=1,
+                recorded_from="2026-04-15T00:00:00Z",
+                recorded_to="2026-04-15T00:02:00Z",
+                audio_bytes=b"RIFF1234WAVEpayload",
             )
-            cleanup_paths = service._reset_generation("other")
-
-        self.assertEqual(cleanup_paths, [stale_path])
+        )
+        service._reset_generation("other")
         self.assertEqual(service._next_chunk_sequence, 1)
 
     def test_enqueue_chunk_stops_when_backlog_limit_is_reached(self) -> None:
         service, _items, _events = self._build_service()
         service._reset_generation("demo")
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for index in range(1, 11):
-                overflowed = service._enqueue_chunk(
-                    PendingChunk(
-                        generation=service._generation,
-                        session="demo",
-                        chunk_sequence=index,
-                        recorded_from="2026-04-15T00:00:00Z",
-                        recorded_to="2026-04-15T00:02:00Z",
-                        path=Path(temp_dir) / f"{index}.wav",
-                    )
-                )
-                self.assertFalse(overflowed)
-
+        for index in range(1, 11):
             overflowed = service._enqueue_chunk(
                 PendingChunk(
                     generation=service._generation,
                     session="demo",
-                    chunk_sequence=11,
+                    chunk_sequence=index,
                     recorded_from="2026-04-15T00:00:00Z",
                     recorded_to="2026-04-15T00:02:00Z",
-                    path=Path(temp_dir) / "11.wav",
+                    audio_bytes=b"RIFF1234WAVEpayload",
                 )
             )
+            self.assertFalse(overflowed)
+
+        overflowed = service._enqueue_chunk(
+            PendingChunk(
+                generation=service._generation,
+                session="demo",
+                chunk_sequence=11,
+                recorded_from="2026-04-15T00:00:00Z",
+                recorded_to="2026-04-15T00:02:00Z",
+                audio_bytes=b"RIFF1234WAVEpayload",
+            )
+        )
 
         self.assertTrue(overflowed)
         self.assertEqual(service._paused_session, "demo")
@@ -146,7 +144,7 @@ class TranscriptionServiceTests(unittest.TestCase):
             chunk_sequence=1,
             recorded_from="2026-04-15T00:00:00Z",
             recorded_to="2026-04-15T00:02:00Z",
-            path=Path("retry.wav"),
+            audio_bytes=b"RIFF1234WAVEpayload",
         )
         service._enqueue_chunk(chunk)
 
@@ -159,45 +157,58 @@ class TranscriptionServiceTests(unittest.TestCase):
         self.assertLessEqual(chunk.next_attempt_at, after + 2.5)
         self.assertEqual(events[-1]["event"], "送信失敗")
 
-    def test_uploader_notifies_saved_item_and_cleans_up_file(self) -> None:
+    def test_uploader_notifies_saved_item(self) -> None:
         service, items, events = self._build_service()
         service._reset_generation("demo")
+        chunk = PendingChunk(
+            generation=service._generation,
+            session="demo",
+            chunk_sequence=1,
+            recorded_from="2026-04-15T00:00:00Z",
+            recorded_to="2026-04-15T00:02:00Z",
+            audio_bytes=b"RIFF1234WAVEpayload",
+        )
+        service._enqueue_chunk(chunk)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            audio_path = Path(temp_dir) / "chunk.wav"
-            audio_path.write_bytes(b"RIFF1234WAVEpayload")
-            chunk = PendingChunk(
-                generation=service._generation,
-                session="demo",
-                chunk_sequence=1,
-                recorded_from="2026-04-15T00:00:00Z",
-                recorded_to="2026-04-15T00:02:00Z",
-                path=audio_path,
-            )
-            service._enqueue_chunk(chunk)
+        def _upload_stub(*_args: object, **_kwargs: object) -> dict[str, object]:
+            service._stop_event.set()
+            return {
+                "id": 1,
+                "session": "demo",
+                "text": "demo:1",
+                "created_at": "2026-04-15T00:02:00Z",
+            }
 
-            def _upload_stub(*_args: object, **_kwargs: object) -> dict[str, object]:
-                service._stop_event.set()
-                return {
-                    "id": 1,
-                    "session": "demo",
-                    "text": "demo:1",
-                    "created_at": "2026-04-15T00:02:00Z",
-                }
+        with patch.object(
+            transcription_service,
+            "upload_transcription_chunk_ws",
+            side_effect=_upload_stub,
+        ):
+            uploader = threading.Thread(target=service._run_uploader, daemon=True)
+            uploader.start()
+            uploader.join(timeout=2.0)
 
-            with patch.object(
-                transcription_service,
-                "post_transcription_chunk",
-                side_effect=_upload_stub,
-            ):
-                uploader = threading.Thread(target=service._run_uploader, daemon=True)
-                uploader.start()
-                uploader.join(timeout=2.0)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "demo:1")
+        self.assertEqual(events[-1]["event"], "保存完了")
 
-            self.assertEqual(len(items), 1)
-            self.assertEqual(items[0]["text"], "demo:1")
-            self.assertEqual(events[-1]["event"], "保存完了")
-            self.assertFalse(audio_path.exists())
+    def test_sample_waveform_points_normalizes_pcm_audio(self) -> None:
+        pcm = (
+            b"\x00\x00"
+            + b"\x00\x40"
+            + b"\x00\xc0"
+            + b"\xff\x7f"
+            + b"\x00\x80"
+        )
+
+        points = transcription_service._sample_waveform_points(pcm, max_points=5)
+
+        self.assertEqual(len(points), 5)
+        self.assertAlmostEqual(points[0], 0.0)
+        self.assertGreater(points[1], 0.49)
+        self.assertLess(points[2], -0.49)
+        self.assertAlmostEqual(points[3], 32767.0 / 32768.0)
+        self.assertEqual(points[4], -1.0)
 
 
 if __name__ == "__main__":

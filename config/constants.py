@@ -48,6 +48,13 @@ def _derive_ws_base_url(base_url: str) -> str:
     return urlunsplit((scheme, parsed.netloc, ws_path, "", ""))
 
 
+def _derive_transcription_ws_base_url(ws_base_url: str) -> str:
+    parsed = urlsplit(ws_base_url)
+    path = parsed.path.rstrip("/")
+    transcription_path = "/ws/transcription" if not path else f"{path}/transcription"
+    return urlunsplit((parsed.scheme, parsed.netloc, transcription_path, "", ""))
+
+
 BACKEND_BASE_URL = _trim_trailing_slash(
     os.environ.get("BACKEND_BASE_URL")
     or os.environ.get("RELAY_SERVER_URL")
@@ -55,6 +62,10 @@ BACKEND_BASE_URL = _trim_trailing_slash(
 )
 BACKEND_WS_BASE_URL = _trim_trailing_slash(
     os.environ.get("BACKEND_WS_BASE_URL") or _derive_ws_base_url(BACKEND_BASE_URL)
+)
+BACKEND_TRANSCRIPTION_WS_BASE_URL = _trim_trailing_slash(
+    os.environ.get("BACKEND_TRANSCRIPTION_WS_BASE_URL")
+    or _derive_transcription_ws_base_url(BACKEND_WS_BASE_URL)
 )
 BACKEND_WS_ORIGIN = os.environ.get("BACKEND_WS_ORIGIN", "https://beaver.works")
 BACKEND_HTTP_TIMEOUT_SEC = 10
@@ -64,9 +75,10 @@ TRANSCRIPTION_TEMP_DIR = _resolve_transcription_temp_dir()
 TRANSCRIPTION_SAMPLE_RATE_HZ = 16_000
 TRANSCRIPTION_CHANNELS = 1
 TRANSCRIPTION_SAMPLE_WIDTH_BYTES = 2
-TRANSCRIPTION_CHUNK_DURATION_SEC = 120
+TRANSCRIPTION_CHUNK_DURATION_SEC = 180
 TRANSCRIPTION_READ_FRAMES = 1_600
 TRANSCRIPTION_BACKLOG_LIMIT = 10
+TRANSCRIPTION_WS_PART_SIZE_BYTES = 64 * 1024
 
 STAMP_BALLOON_LIFETIME_SEC = 8.0
 STAMP_BALLOON_MIN_SPEED_PX = 90.0
