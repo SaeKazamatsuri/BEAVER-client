@@ -5,3 +5,4 @@ wsproto
 requests
 openpyxl
 sounddevice
+Pillow

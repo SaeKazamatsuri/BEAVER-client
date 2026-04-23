@@ -14,6 +14,10 @@ from config.constants import (
     TRANSCRIPTION_BACKLOG_LIMIT,
     TRANSCRIPTION_CHANNELS,
     TRANSCRIPTION_CHUNK_DURATION_SEC,
+    TRANSCRIPTION_GAIN_MAX,
+    TRANSCRIPTION_GAIN_NOISE_FLOOR,
+    TRANSCRIPTION_GAIN_SMOOTHING,
+    TRANSCRIPTION_GAIN_TARGET_RMS,
     TRANSCRIPTION_READ_FRAMES,
     TRANSCRIPTION_SAMPLE_RATE_HZ,
     TRANSCRIPTION_SAMPLE_WIDTH_BYTES,
@@ -30,6 +34,31 @@ ItemCallback = Callable[[dict[str, object]], None]
 WaveformCallback = Callable[[list[float]], None]
 
 _MISSING = object()
+
+
+class _GainController:
+    def __init__(self) -> None:
+        self._gain = 1.0
+
+    def reset(self) -> None:
+        self._gain = 1.0
+
+    def process(self, audio_bytes: bytes) -> bytes:
+        sample_count = len(audio_bytes) // TRANSCRIPTION_SAMPLE_WIDTH_BYTES
+        if sample_count == 0:
+            return audio_bytes
+        samples = list(struct.unpack_from(f"<{sample_count}h", audio_bytes))
+        rms = (sum(s * s for s in samples) / sample_count) ** 0.5 / 32768.0
+        if rms > TRANSCRIPTION_GAIN_NOISE_FLOOR:
+            target = min(TRANSCRIPTION_GAIN_MAX, TRANSCRIPTION_GAIN_TARGET_RMS / rms)
+            self._gain += TRANSCRIPTION_GAIN_SMOOTHING * (target - self._gain)
+        gain = self._gain
+        if abs(gain - 1.0) < 1e-3:
+            return audio_bytes
+        return struct.pack(
+            f"<{sample_count}h",
+            *(max(-32768, min(32767, round(s * gain))) for s in samples),
+        )
 
 
 @dataclass(slots=True)
@@ -77,6 +106,7 @@ class TranscriptionService:
         self._generation = 0
         self._next_chunk_sequence = 1
         self._paused_session: str | None = None
+        self._gain_controller = _GainController()
         self._status_snapshot: dict[str, object] = {
             "state": "idle",
             "process_alive": False,
@@ -170,6 +200,7 @@ class TranscriptionService:
 
             if session != active_session:
                 self._reset_generation(session)
+                self._gain_controller.reset()
                 active_session = session
                 last_idle_published = False
                 self._publish_status(
@@ -292,6 +323,7 @@ class TranscriptionService:
                         return None
 
                     audio_bytes, _overflowed = stream.read(TRANSCRIPTION_READ_FRAMES)
+                    audio_bytes = self._gain_controller.process(audio_bytes)
                     wav_file.writeframes(audio_bytes)
                     self._notify_waveform(audio_bytes)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64
+import io
 import math
 import random
 import threading
@@ -11,6 +11,7 @@ from typing import Tuple
 
 import requests
 import tkinter as tk
+from PIL import Image, ImageTk
 
 from config.constants import (
     BACKEND_BASE_URL,
@@ -131,20 +132,18 @@ def _spawn_balloon_from_bytes(stamp_id: str, data: bytes) -> None:
     if canvas is None:
         return
     try:
-        encoded = base64.b64encode(data).decode("ascii")
-        photo = tk.PhotoImage(data=encoded)
+        img = Image.open(io.BytesIO(data))
+        width, height = img.size
+        if width > STAMP_BALLOON_MAX_WIDTH:
+            factor = max(1, math.ceil(width / STAMP_BALLOON_MAX_WIDTH))
+            img = img.resize((width // factor, height // factor), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
     except Exception:
         return
 
     width = photo.width()
     if width <= 0:
         return
-    if width > STAMP_BALLOON_MAX_WIDTH:
-        factor = max(1, math.ceil(width / STAMP_BALLOON_MAX_WIDTH))
-        try:
-            photo = photo.subsample(factor, factor)
-        except Exception:
-            pass
 
     canvas.update_idletasks()
     canvas_w = canvas.winfo_width()

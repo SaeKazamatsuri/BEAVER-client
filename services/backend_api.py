@@ -72,6 +72,7 @@ def upload_transcription_chunk_ws(
         build_transcription_ws_url(session)
     )
     try:
+        socket_handle.settimeout(BACKEND_UPLOAD_TIMEOUT_SEC)
         start_message = {
             "type": "transcription.chunk.start",
             "payload": {
