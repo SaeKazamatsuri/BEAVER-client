@@ -48,6 +48,14 @@ def _derive_ws_base_url(base_url: str) -> str:
     return urlunsplit((scheme, parsed.netloc, ws_path, "", ""))
 
 
+def _derive_client_ws_base_url(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    path = parsed.path.rstrip("/")
+    ws_path = "/client/ws" if not path else f"{path}/client/ws"
+    return urlunsplit((scheme, parsed.netloc, ws_path, "", ""))
+
+
 def _derive_transcription_ws_base_url(ws_base_url: str) -> str:
     parsed = urlsplit(ws_base_url)
     path = parsed.path.rstrip("/")
@@ -62,6 +70,10 @@ BACKEND_BASE_URL = _trim_trailing_slash(
 )
 BACKEND_WS_BASE_URL = _trim_trailing_slash(
     os.environ.get("BACKEND_WS_BASE_URL") or _derive_ws_base_url(BACKEND_BASE_URL)
+)
+BACKEND_CLIENT_WS_BASE_URL = _trim_trailing_slash(
+    os.environ.get("BACKEND_CLIENT_WS_BASE_URL")
+    or _derive_client_ws_base_url(BACKEND_BASE_URL)
 )
 BACKEND_TRANSCRIPTION_WS_BASE_URL = _trim_trailing_slash(
     os.environ.get("BACKEND_TRANSCRIPTION_WS_BASE_URL")

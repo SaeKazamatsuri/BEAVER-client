@@ -23,10 +23,10 @@ from wsproto.events import (
 
 from config.constants import (
     BACKEND_BASE_URL,
+    BACKEND_CLIENT_WS_BASE_URL,
     BACKEND_HTTP_TIMEOUT_SEC,
     BACKEND_TRANSCRIPTION_WS_BASE_URL,
     BACKEND_UPLOAD_TIMEOUT_SEC,
-    BACKEND_WS_BASE_URL,
     BACKEND_WS_ORIGIN,
     TRANSCRIPTION_WS_PART_SIZE_BYTES,
 )
@@ -42,8 +42,8 @@ def build_api_url(path: str) -> str:
 
 
 def build_ws_url(session: str) -> str:
-    separator = "&" if "?" in BACKEND_WS_BASE_URL else "?"
-    return f"{BACKEND_WS_BASE_URL}{separator}session={quote(session, safe='')}"
+    separator = "&" if "?" in BACKEND_CLIENT_WS_BASE_URL else "?"
+    return f"{BACKEND_CLIENT_WS_BASE_URL}{separator}session={quote(session, safe='')}"
 
 
 def build_transcription_ws_url(session: str) -> str:
@@ -141,7 +141,7 @@ def fetch_bootstrap(raw_session: str) -> tuple[str, list[dict[str, object]]]:
         params["session"] = raw_session
 
     response = requests.get(
-        build_api_url("/api/bootstrap"),
+        build_api_url("/api/client/bootstrap"),
         params=params,
         timeout=BACKEND_HTTP_TIMEOUT_SEC,
     )
