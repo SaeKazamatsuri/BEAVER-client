@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import queue
 import threading
 import time
@@ -30,6 +31,8 @@ recent_stamp_ids_set: set[str] = set()
 
 CURRENT_SESSION = "default"
 session_ready = False
+# コメント表示順: "chronological"（新着順）/ "bookmark"（しおり降順）
+display_order: str = "chronological"
 root: tk.Tk | None = None
 menu_status_var: tk.StringVar | None = None
 menu_session_var: tk.StringVar | None = None
@@ -107,6 +110,29 @@ def append_message(entry: CommentEntry) -> None:
 def snapshot_messages() -> tuple[int, list[CommentEntry]]:
     with _message_lock:
         return _message_generation, list(messages)
+
+
+def apply_reaction_update(comment_id: int, bookmark_count: int) -> None:
+    """しおり件数のライブ更新。変化があれば世代を進めて再描画させる。"""
+    global _message_generation
+    with _message_lock:
+        changed = False
+        for index, entry in enumerate(messages):
+            if entry.id == comment_id:
+                if entry.bookmark_count != bookmark_count:
+                    messages[index] = dataclasses.replace(
+                        entry, bookmark_count=bookmark_count
+                    )
+                    changed = True
+                break
+        for raw in message_log:
+            if raw.get("id") == comment_id:
+                if raw.get("bookmark_count") != bookmark_count:
+                    raw["bookmark_count"] = bookmark_count
+                    changed = True
+                break
+        if changed:
+            _message_generation += 1
 
 
 def safe_set(var: tk.StringVar | None, text: str) -> None:

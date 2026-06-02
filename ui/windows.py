@@ -377,6 +377,16 @@ def _render_comment_history_rows(
             wraplength=520,
         ).grid(row=0, column=2, sticky="nsew")
 
+        if entry.bookmarks > 0:
+            tk.Label(
+                row,
+                text=f"🔖 {entry.bookmarks}",
+                bg=admin_theme.WINDOW_BG,
+                fg=admin_theme.TITLE_COLOR,
+                font=admin_theme.SMALL_BOLD_FONT,
+                anchor="e",
+            ).grid(row=0, column=3, sticky="ne", padx=(10, 0))
+
         if index < last_index:
             tk.Frame(parent, bg=admin_theme.BORDER_COLOR, height=1).pack(
                 fill="x",
@@ -433,16 +443,17 @@ def _open_history_window(root_ref: tk.Tk) -> None:
     )
     timeline_frame.pack(expand=True, fill="both", pady=(8, 0))
 
-    last_signature: list[tuple[tuple[str, str, str, str], ...] | None] = [None]
+    last_signature: list[object] = [None]
 
     def refresh() -> None:
         if not win.winfo_exists():
             return
 
         snapshot = list(state.message_log)
-        signature = build_comment_history_signature(snapshot)
+        order = state.display_order
+        signature = (build_comment_history_signature(snapshot), order)
         if signature != last_signature[0]:
-            rows = build_comment_history_rows(snapshot)
+            rows = build_comment_history_rows(snapshot, order=order)
             count_var.set(f"表示件数: {len(rows)} 件")
             _render_comment_history_rows(
                 content,
@@ -842,10 +853,16 @@ def _open_experiment_window(
     ).pack(side="right")
 
 
+def _display_order_button_text(order: str) -> str:
+    # 押すと反対の並びに切り替わるので、現在の並びとは逆のラベルを出す。
+    return "時系列順に表示" if order == "bookmark" else "リアクション順に表示"
+
+
 def create_menu_window(
     switch_display_callback: Callable[[], None],
     refresh_layout_callback: Callable[[], None],
     root_ref: tk.Tk,
+    set_display_order_callback: Callable[[str], None] | None = None,
 ) -> None:
     menu = tk.Toplevel(root_ref)
     menu.title("コントローラーメニュー")
@@ -909,6 +926,22 @@ def create_menu_window(
         right_text="文字起こし履歴",
         right_command=lambda: _open_transcription_history_window(root_ref),
     )
+
+    def toggle_display_order() -> None:
+        next_order = "chronological" if state.display_order == "bookmark" else "bookmark"
+        state.display_order = next_order
+        if set_display_order_callback is not None:
+            set_display_order_callback(next_order)
+        if display_order_button.winfo_exists():
+            display_order_button.configure(text=_display_order_button_text(next_order))
+
+    display_order_button = admin_theme.create_button(
+        buttons,
+        text=_display_order_button_text(state.display_order),
+        command=toggle_display_order,
+        variant="secondary",
+    )
+    display_order_button.pack(fill="x", pady=(0, 10))
 
     def export_dialog(fmt: str) -> None:
         if not state.message_log:

@@ -90,7 +90,15 @@ def main() -> None:
     def switch_display() -> None:
         layout_controller.switch_display()
 
-    create_menu_window(switch_display, layout_controller.refresh_layout, root)
+    def set_display_order(order: str) -> None:
+        comment_list.set_display_order(order)
+
+    create_menu_window(
+        switch_display,
+        layout_controller.refresh_layout,
+        root,
+        set_display_order,
+    )
     update_comments()
 
     def on_close() -> None:

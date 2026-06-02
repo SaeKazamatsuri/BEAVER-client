@@ -29,6 +29,7 @@ from services.backend_api import (
     fetch_bootstrap,
     fetch_transcriptions,
     parse_comment_event,
+    parse_reaction_update_event,
 )
 
 _connection_lock = threading.Lock()
@@ -66,6 +67,14 @@ def _on_new_comment(entry):
             return
         state.message_log.append(entry)
         state.message_queue.put(entry)
+
+
+def _on_reaction_update(update: dict) -> None:
+    comment_id = update.get("comment_id")
+    bookmark_count = update.get("bookmark_count")
+    if not isinstance(comment_id, int) or not isinstance(bookmark_count, int):
+        return
+    state.apply_reaction_update(comment_id, bookmark_count)
 
 
 def _next_connection_serial() -> int:
@@ -230,11 +239,16 @@ def _run_websocket(session: str, serial: int, stop_event: threading.Event) -> No
                             message = "".join(message_parts)
                             message_parts.clear()
                             entry = parse_comment_event(message)
-                            if entry is None:
+                            if entry is not None:
+                                if entry.get("session") != session:
+                                    continue
+                                _on_new_comment(entry)
                                 continue
-                            if entry.get("session") != session:
-                                continue
-                            _on_new_comment(entry)
+                            reaction = parse_reaction_update_event(message)
+                            if reaction is not None:
+                                if reaction.get("session") != session:
+                                    continue
+                                _on_reaction_update(reaction)
                     elif isinstance(event, Ping):
                         try:
                             sock.sendall(connection.send(event.response()))

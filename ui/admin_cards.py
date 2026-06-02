@@ -19,6 +19,7 @@ class CommentHistoryRow:
     timestamp: str
     name: str
     text: str
+    bookmarks: int = 0
 
 
 def string_value(value: object) -> str:
@@ -45,8 +46,17 @@ def _is_stamp_message(message: dict[str, object]) -> bool:
     )
 
 
+def _bookmark_count(message: dict[str, object]) -> int:
+    value = message.get("bookmark_count")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
 def build_comment_history_rows(
     messages: Sequence[dict[str, object]],
+    *,
+    order: str = "chronological",
 ) -> list[CommentHistoryRow]:
     rows: list[CommentHistoryRow] = []
     for message in messages:
@@ -61,20 +71,25 @@ def build_comment_history_rows(
                 timestamp=timestamp,
                 name=string_value(message.get("name")) or "名前なし",
                 text=string_value(message.get("text")) or "-",
+                bookmarks=_bookmark_count(message),
             )
         )
+    if order == "bookmark":
+        # 安定ソートなので同数は元の順序（message_log 順）を維持する。
+        rows.sort(key=lambda row: row.bookmarks, reverse=True)
     return rows
 
 
 def build_comment_history_signature(
     messages: Sequence[dict[str, object]],
-) -> tuple[tuple[str, str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str, int], ...]:
     return tuple(
         (
             string_value(message.get("time")),
             string_value(message.get("name")),
             string_value(message.get("text")),
             string_value(message.get("created_at")),
+            _bookmark_count(message),
         )
         for message in messages
         if not _is_stamp_message(message)

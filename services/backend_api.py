@@ -460,6 +460,53 @@ def parse_comment_event(raw_message: str) -> dict[str, object] | None:
         return None
 
 
+# しおり=bookmark の単一リアクション。注目度はこの件数で測る。
+BOOKMARK_REACTION_KEY = "bookmark"
+
+
+def _bookmark_count_from_reactions(value: object) -> int:
+    if not isinstance(value, list):
+        return 0
+    for reaction in value:
+        if not isinstance(reaction, Mapping):
+            continue
+        if reaction.get("reactionKey") != BOOKMARK_REACTION_KEY:
+            continue
+        count = reaction.get("count")
+        if isinstance(count, bool):
+            continue
+        if isinstance(count, int):
+            return count
+    return 0
+
+
+def parse_reaction_update_event(raw_message: str) -> dict[str, object] | None:
+    """comment.reactions.updated を解釈し、しおり件数のライブ更新に使う。"""
+    try:
+        payload = json.loads(raw_message)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("type") != "comment.reactions.updated":
+        return None
+    body = payload.get("payload")
+    if not isinstance(body, Mapping):
+        return None
+    comment_id = body.get("commentId")
+    session = body.get("session")
+    if isinstance(comment_id, bool) or not isinstance(comment_id, int):
+        return None
+    if not isinstance(session, str):
+        return None
+    return {
+        "session": session,
+        "comment_id": comment_id,
+        "bookmark_count": _bookmark_count_from_reactions(body.get("reactions")),
+    }
+
+
 def normalize_comment_item(value: object) -> dict[str, object]:
     payload = _require_mapping(value, "comment")
     stamp = _require_nullable_string(payload.get("stamp"), "stamp")
@@ -479,6 +526,7 @@ def normalize_comment_item(value: object) -> dict[str, object]:
         "source": source,
         "created_at": created_at,
         "server_time_iso": created_at,
+        "bookmark_count": _bookmark_count_from_reactions(payload.get("reactions")),
     }
 
 

@@ -36,6 +36,7 @@ class CommentEntry:
     created_at: str
     from_history: bool
     source: str | None = None
+    bookmark_count: int = 0
 
 
 def insert_soft_wraps(text: str, chunk: int = 16) -> str:
@@ -71,6 +72,12 @@ def comment_entry_from_message(message: Mapping[str, object]) -> CommentEntry | 
 
     from_history = bool(message.get("_from_history", False))
     source = _required_string(message.get("source")) if "source" in message else None
+    raw_bookmark = message.get("bookmark_count")
+    bookmark_count = (
+        raw_bookmark
+        if isinstance(raw_bookmark, int) and not isinstance(raw_bookmark, bool)
+        else 0
+    )
 
     return CommentEntry(
         id=entry_id,
@@ -82,6 +89,7 @@ def comment_entry_from_message(message: Mapping[str, object]) -> CommentEntry | 
         created_at=created_at,
         from_history=from_history,
         source=source,
+        bookmark_count=bookmark_count,
     )
 
 
@@ -438,6 +446,8 @@ class CommentListView(tk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, background=COMMENT_COLUMN_BG)
         self._comments: list[CommentEntry] = []
+        # "chronological"（新着順）か "bookmark"（しおり降順）。
+        self._display_order = "chronological"
         self._redraw_scheduled = False
 
         self._ai_question_entry: CommentEntry | None = None
@@ -475,6 +485,13 @@ class CommentListView(tk.Frame):
     @property
     def overlay_canvas(self) -> tk.Canvas:
         return self._canvas
+
+    def set_display_order(self, order: str) -> None:
+        normalized = "bookmark" if order == "bookmark" else "chronological"
+        if normalized == self._display_order:
+            return
+        self._display_order = normalized
+        self._schedule_redraw()
 
     def clear(self) -> None:
         self._comments.clear()
@@ -588,7 +605,16 @@ class CommentListView(tk.Frame):
         current_y = 10
         card_right = max(card_left + 220, width - 18)
 
-        for entry in self._comments:
+        # しおり降順モードでは件数の多い順に並べる（同数は新着順を維持）。
+        # _comments は新着が先頭なので、安定ソートで同数のタイブレークは新着順になる。
+        if self._display_order == "bookmark":
+            ordered = sorted(
+                self._comments, key=lambda entry: entry.bookmark_count, reverse=True
+            )
+        else:
+            ordered = self._comments
+
+        for entry in ordered:
             height = _draw_comment_card(
                 self._canvas,
                 entry,

@@ -44,6 +44,56 @@ from ui.admin_cards import (
 )
 from ui.file_utils import build_export_filename, sanitize_filename_component
 from ui.windows import toggle_comment_window_visibility
+from services.backend_api import (
+    normalize_comment_item,
+    parse_reaction_update_event,
+)
+
+
+class ReactionUpdateParsingTests(unittest.TestCase):
+    def test_parses_bookmark_count(self) -> None:
+        message = (
+            '{"type":"comment.reactions.updated","payload":{"session":"demo",'
+            '"commentId":7,"reactions":[{"reactionKey":"bookmark","count":3,'
+            '"reactedByCurrentUser":false}]}}'
+        )
+        result = parse_reaction_update_event(message)
+        self.assertEqual(
+            result, {"session": "demo", "comment_id": 7, "bookmark_count": 3}
+        )
+
+    def test_empty_reactions_means_zero(self) -> None:
+        message = (
+            '{"type":"comment.reactions.updated","payload":{"session":"demo",'
+            '"commentId":7,"reactions":[]}}'
+        )
+        result = parse_reaction_update_event(message)
+        self.assertEqual(result, {"session": "demo", "comment_id": 7, "bookmark_count": 0})
+
+    def test_ignores_other_event_types(self) -> None:
+        self.assertIsNone(
+            parse_reaction_update_event('{"type":"comment.created","payload":{}}')
+        )
+
+    def test_normalize_comment_item_extracts_bookmark_count(self) -> None:
+        item = normalize_comment_item(
+            {
+                "id": 1,
+                "session": "demo",
+                "name": "A",
+                "realName": "A",
+                "text": "hi",
+                "time": "10:00",
+                "stamp": None,
+                "stampPath": None,
+                "source": "textbox",
+                "createdAt": "2026-03-10T00:00:00Z",
+                "reactions": [
+                    {"reactionKey": "bookmark", "count": 2, "reactedByCurrentUser": True}
+                ],
+            }
+        )
+        self.assertEqual(item["bookmark_count"], 2)
 
 
 class _CommentWindowDouble:
@@ -91,6 +141,35 @@ class BuildCommentHistoryRowsTests(unittest.TestCase):
         self.assertEqual(rows[0].timestamp, "12:34")
         self.assertEqual(rows[0].name, "Alice")
         self.assertEqual(rows[0].text, "こんにちは")
+
+    def test_bookmark_order_sorts_by_count_desc(self) -> None:
+        messages: list[dict[str, object]] = [
+            {
+                "name": "A",
+                "text": "few",
+                "time": "10:00",
+                "created_at": "2026-03-10T01:00:00Z",
+                "bookmark_count": 1,
+            },
+            {
+                "name": "B",
+                "text": "many",
+                "time": "10:01",
+                "created_at": "2026-03-10T01:01:00Z",
+                "bookmark_count": 5,
+            },
+            {
+                "name": "C",
+                "text": "none",
+                "time": "10:02",
+                "created_at": "2026-03-10T01:02:00Z",
+            },
+        ]
+
+        rows = build_comment_history_rows(messages, order="bookmark")
+
+        self.assertEqual([row.text for row in rows], ["many", "few", "none"])
+        self.assertEqual(rows[0].bookmarks, 5)
 
     def test_skips_stamp_entries_and_applies_fallbacks(self) -> None:
         messages: list[dict[str, object]] = [
@@ -142,7 +221,9 @@ class BuildCommentHistoryRowsTests(unittest.TestCase):
 
         signature = build_comment_history_signature(messages)
 
-        self.assertEqual(signature, (("10:15", "Bob", "hello", "2026-03-10T01:15:00Z"),))
+        self.assertEqual(
+            signature, (("10:15", "Bob", "hello", "2026-03-10T01:15:00Z", 0),)
+        )
 
 
 class BuildTranscriptionTimelineTests(unittest.TestCase):
