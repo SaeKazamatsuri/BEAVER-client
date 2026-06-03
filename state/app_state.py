@@ -39,6 +39,8 @@ menu_session_var: tk.StringVar | None = None
 menu_current_session_var: tk.StringVar | None = None
 experiment_window: tk.Toplevel | None = None
 transcription_history_window: tk.Toplevel | None = None
+poll_window: tk.Toplevel | None = None
+poll_results_window: tk.Toplevel | None = None
 
 # --- Experiment (stamp) settings ---
 # These values are intentionally mutable so experiments can tweak them at runtime.

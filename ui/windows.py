@@ -1,20 +1,30 @@
 from __future__ import annotations
 
 import io
+import threading
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from services.backend_api import (
+    BackendApiError,
+    create_poll,
+    fetch_poll_results,
+    fetch_polls,
+    start_poll,
+)
 from services.events import connect_session, disconnect_session
 from services.transcription_service import stop_transcription_service
 from state import app_state as state
 from ui.admin_cards import (
     AdminListCard,
     CommentHistoryRow,
+    PollResultsView,
     build_comment_history_rows,
     build_comment_history_signature,
+    build_poll_results_view,
     build_transcription_timeline,
     format_timestamp as _format_timestamp,
     string_value as _string_value,
@@ -23,9 +33,11 @@ from ui.file_utils import build_export_filename
 from ui import admin_theme
 
 try:
+    import win32api
     import win32con
     import win32gui
 except ModuleNotFoundError:
+    win32api = None
     win32con = None
     win32gui = None
 
@@ -853,6 +865,581 @@ def _open_experiment_window(
     ).pack(side="right")
 
 
+# === アンケート（poll）===
+
+
+def _current_session_name() -> str:
+    session = _string_value(getattr(state, "CURRENT_SESSION", "")).strip()
+    if session:
+        return session
+    menu_session_var = state.menu_session_var
+    if menu_session_var is not None:
+        candidate = menu_session_var.get().strip()
+        if candidate:
+            return candidate
+    return "default"
+
+
+def _show_async_error(root_ref: tk.Tk, message: str) -> None:
+    def show() -> None:
+        try:
+            messagebox.showerror("アンケート", message)
+        except Exception:
+            pass
+
+    try:
+        root_ref.after(0, show)
+    except Exception:
+        pass
+
+
+def _center_window_on_monitor(win: tk.Toplevel, anchor: tk.Misc) -> None:
+    """コメントオーバーレイ（anchor）と同じモニタの中央へ配置する。"""
+    win.update_idletasks()
+    width = win.winfo_width() or win.winfo_reqwidth()
+    height = win.winfo_height() or win.winfo_reqheight()
+
+    try:
+        anchor_x = anchor.winfo_rootx()
+        anchor_y = anchor.winfo_rooty()
+        anchor_w = anchor.winfo_width()
+        anchor_h = anchor.winfo_height()
+    except Exception:
+        anchor_x = anchor_y = 0
+        anchor_w = win.winfo_screenwidth()
+        anchor_h = win.winfo_screenheight()
+
+    left = anchor_x + (anchor_w - width) // 2
+    top = anchor_y + (anchor_h - height) // 2
+
+    if win32api is not None and win32con is not None:
+        try:
+            monitor = win32api.MonitorFromWindow(
+                anchor.winfo_id(), win32con.MONITOR_DEFAULTTONEAREST
+            )
+            info = win32api.GetMonitorInfo(monitor)
+            area = info.get("Work") or info.get("Monitor")
+            if area is not None:
+                mon_left, mon_top, mon_right, mon_bottom = area
+                left = mon_left + ((mon_right - mon_left) - width) // 2
+                top = mon_top + ((mon_bottom - mon_top) - height) // 2
+        except Exception:
+            pass
+
+    win.geometry(f"{width}x{height}+{int(left)}+{int(top)}")
+
+
+def _render_poll_list(
+    parent: tk.Frame,
+    polls: Sequence[dict[str, object]],
+    *,
+    root_ref: tk.Tk,
+    session: str,
+    on_start: Callable[[int], None],
+    on_results: Callable[[int], None],
+) -> None:
+    for child in parent.winfo_children():
+        child.destroy()
+
+    if not polls:
+        tk.Label(
+            parent,
+            text="まだアンケートは登録されていません。",
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.SUBTLE_TEXT_COLOR,
+            justify="left",
+            wraplength=560,
+            anchor="w",
+            padx=8,
+            pady=16,
+            font=admin_theme.BODY_FONT,
+        ).pack(fill="x")
+        return
+
+    for poll in polls:
+        poll_id = poll.get("id")
+        if not isinstance(poll_id, int):
+            continue
+        options = poll.get("options")
+        option_labels = (
+            [str(option) for option in options] if isinstance(options, list) else []
+        )
+        duration = poll.get("duration_sec")
+        duration_text = f"{duration} 秒" if isinstance(duration, int) else "-"
+
+        card = admin_theme.create_card(parent)
+        card.pack(fill="x", padx=8, pady=6)
+
+        tk.Label(
+            card,
+            text=_string_value(poll.get("question")) or "-",
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.TITLE_COLOR,
+            font=admin_theme.CARD_TITLE_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        ).pack(fill="x")
+
+        tk.Label(
+            card,
+            text="／".join(option_labels) if option_labels else "-",
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=520,
+            pady=4,
+        ).pack(fill="x")
+
+        tk.Label(
+            card,
+            text=f"制限時間: {duration_text}",
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.MUTED_TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            anchor="w",
+        ).pack(fill="x")
+
+        actions = tk.Frame(card, bg=admin_theme.SURFACE_BG)
+        actions.pack(fill="x", pady=(8, 0))
+        admin_theme.create_button(
+            actions,
+            text="開始（配信）",
+            command=lambda pid=poll_id: on_start(pid),
+            variant="primary",
+        ).pack(side="left", expand=True, fill="x")
+        admin_theme.create_button(
+            actions,
+            text="集計",
+            command=lambda pid=poll_id: on_results(pid),
+            variant="secondary",
+        ).pack(side="left", expand=True, fill="x", padx=(10, 0))
+
+
+def _open_poll_window(root_ref: tk.Tk) -> None:
+    if _focus_existing_window(state.poll_window):
+        return
+
+    win = tk.Toplevel(root_ref)
+    state.poll_window = win
+    win.title("アンケート")
+
+    def on_close() -> None:
+        try:
+            win.destroy()
+        finally:
+            state.poll_window = None
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    wrapper = admin_theme.create_window_shell(win, geometry="640x780", topmost=True)
+    _create_window_header(
+        wrapper,
+        title="アンケート",
+        description="質問と選択肢（2〜4個）を登録し、接続中のユーザーへ配信できます。配信後は集計で結果を確認できます。",
+        wraplength=560,
+    )
+
+    form = _create_titled_card(
+        wrapper,
+        title="質問を登録",
+        description="選択肢は2〜4個（空欄は無視）。制限時間内に未回答だと回答側は自動で閉じます。",
+        wraplength=560,
+    )
+
+    question_var = tk.StringVar()
+    tk.Label(
+        form,
+        text="質問文",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(6, 0))
+    admin_theme.create_entry(form, textvariable=question_var).pack(
+        fill="x", pady=(2, 8)
+    )
+
+    option_vars = [tk.StringVar() for _ in range(4)]
+    for index, option_var in enumerate(option_vars):
+        tk.Label(
+            form,
+            text=f"選択肢{index + 1}",
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            anchor="w",
+        ).pack(fill="x")
+        admin_theme.create_entry(form, textvariable=option_var).pack(
+            fill="x", pady=(2, 6)
+        )
+
+    duration_var = tk.DoubleVar(value=20.0)
+    tk.Label(
+        form,
+        text="制限時間（秒）",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(4, 0))
+    admin_theme.create_scale(
+        form,
+        variable=duration_var,
+        from_=5,
+        to=120,
+        resolution=1,
+        command=lambda _value: None,
+        background=admin_theme.SURFACE_BG,
+    ).pack(fill="x", pady=(2, 6))
+
+    list_frame, list_content = admin_theme.create_scrollable_panel(
+        wrapper,
+        background=admin_theme.WINDOW_BG,
+    )
+
+    def start_poll_action(poll_id: int) -> None:
+        session = _current_session_name()
+
+        def worker() -> None:
+            try:
+                start_poll(session, poll_id)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001 - ネットワーク例外を UI に伝える
+                _show_async_error(root_ref, str(exc))
+                return
+            root_ref.after(
+                0, lambda: messagebox.showinfo("アンケート", "配信しました。")
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_results(poll_id: int) -> None:
+        _open_poll_results_window(root_ref, poll_id, _current_session_name())
+
+    def refresh_list() -> None:
+        session = _current_session_name()
+
+        def worker() -> None:
+            try:
+                polls = fetch_polls(session)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+
+            def apply() -> None:
+                if not win.winfo_exists():
+                    return
+                _render_poll_list(
+                    list_content,
+                    polls,
+                    root_ref=root_ref,
+                    session=session,
+                    on_start=start_poll_action,
+                    on_results=open_results,
+                )
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def submit() -> None:
+        question = question_var.get().strip()
+        options = [
+            option_var.get().strip()
+            for option_var in option_vars
+            if option_var.get().strip()
+        ]
+        duration = int(round(float(duration_var.get())))
+        if not question:
+            messagebox.showinfo("アンケート", "質問文を入力してください。")
+            return
+        if len(options) < 2:
+            messagebox.showinfo("アンケート", "選択肢を2個以上入力してください。")
+            return
+        session = _current_session_name()
+
+        def worker() -> None:
+            try:
+                create_poll(session, question, options, duration)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+
+            def apply() -> None:
+                if not win.winfo_exists():
+                    return
+                question_var.set("")
+                for option_var in option_vars:
+                    option_var.set("")
+                refresh_list()
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    admin_theme.create_button(
+        form,
+        text="登録",
+        command=submit,
+        variant="primary",
+    ).pack(fill="x", pady=(4, 0))
+
+    list_header = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    list_header.pack(fill="x", pady=(12, 0))
+    tk.Label(
+        list_header,
+        text="登録済みアンケート",
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.SECTION_TITLE_FONT,
+        anchor="w",
+    ).pack(side="left")
+    admin_theme.create_button(
+        list_header,
+        text="更新",
+        command=refresh_list,
+        variant="secondary",
+    ).pack(side="right")
+
+    list_frame.pack(expand=True, fill="both", pady=(8, 0))
+
+    refresh_list()
+
+
+def _render_poll_results(content: tk.Frame, view: PollResultsView) -> None:
+    for child in content.winfo_children():
+        child.destroy()
+
+    tk.Label(
+        content,
+        text=view.question,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.SECTION_TITLE_FONT,
+        justify="left",
+        anchor="w",
+        wraplength=460,
+    ).pack(fill="x", pady=(0, 8))
+
+    average_text = (
+        f"{view.average_response_sec:.1f} 秒"
+        if view.average_response_sec is not None
+        else "-"
+    )
+    tk.Label(
+        content,
+        text=(
+            f"回答率: {view.answer_rate_percent:.1f}%"
+            f"（{view.answer_count} / {view.delivered_count} 人）"
+            f"　平均回答時間: {average_text}"
+        ),
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        justify="left",
+        anchor="w",
+        wraplength=460,
+    ).pack(fill="x", pady=(0, 10))
+
+    for option in view.options:
+        card = admin_theme.create_card(content, pady=10)
+        card.pack(fill="x", pady=4)
+        tk.Label(
+            card,
+            text=option.label,
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.TITLE_COLOR,
+            font=admin_theme.CARD_TITLE_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=420,
+        ).pack(fill="x")
+        tk.Label(
+            card,
+            text=f"{option.count} 票 ／ {option.percentage:.1f}%",
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            anchor="w",
+        ).pack(fill="x", pady=(2, 4))
+        track = tk.Frame(card, bg="#e2e8f0", height=10)
+        track.pack(fill="x")
+        fill = tk.Frame(track, bg=admin_theme.PRIMARY_BUTTON_BG, height=10)
+        fill.place(x=0, y=0, relheight=1.0, relwidth=min(1.0, option.percentage / 100.0))
+
+    tk.Label(
+        content,
+        text="回答者",
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.SECTION_TITLE_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(12, 4))
+
+    if not view.answers:
+        tk.Label(
+            content,
+            text="まだ回答はありません。",
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.SUBTLE_TEXT_COLOR,
+            font=admin_theme.BODY_FONT,
+            anchor="w",
+            padx=8,
+            pady=8,
+        ).pack(fill="x")
+        return
+
+    for answer in view.answers:
+        row = tk.Frame(content, bg=admin_theme.WINDOW_BG, padx=6, pady=3)
+        row.pack(fill="x")
+        row.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            row,
+            text=answer.name,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.TITLE_COLOR,
+            font=admin_theme.SMALL_BOLD_FONT,
+            anchor="w",
+            width=14,
+        ).grid(row=0, column=0, sticky="nw", padx=(0, 8))
+        tk.Label(
+            row,
+            text=answer.option_label,
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.TEXT_COLOR,
+            font=admin_theme.BODY_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=300,
+        ).grid(row=0, column=1, sticky="nsew")
+        tk.Label(
+            row,
+            text=f"{answer.response_sec:.1f}s",
+            bg=admin_theme.WINDOW_BG,
+            fg=admin_theme.MUTED_TEXT_COLOR,
+            font=admin_theme.SMALL_FONT,
+            anchor="e",
+        ).grid(row=0, column=2, sticky="ne", padx=(8, 0))
+
+
+def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> None:
+    # 別ポールの集計を開く場合は、既存の集計ウィンドウを作り直す。
+    existing = state.poll_results_window
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                existing.destroy()
+        except Exception:
+            pass
+        state.poll_results_window = None
+
+    win = tk.Toplevel(root_ref)
+    state.poll_results_window = win
+    win.title("アンケート集計")
+    win.configure(bg=admin_theme.WINDOW_BG)
+    win.geometry("520x680")
+    win.attributes("-topmost", True)
+
+    def on_close() -> None:
+        try:
+            win.destroy()
+        finally:
+            state.poll_results_window = None
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    wrapper = tk.Frame(win, bg=admin_theme.WINDOW_BG, padx=16, pady=16)
+    wrapper.pack(expand=True, fill="both")
+
+    status_var = tk.StringVar(value="読み込み中…")
+    header = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    header.pack(fill="x")
+    tk.Label(
+        header,
+        text="アンケート集計",
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TITLE_COLOR,
+        font=admin_theme.WINDOW_TITLE_FONT,
+        anchor="w",
+    ).pack(side="left")
+    tk.Label(
+        wrapper,
+        textvariable=status_var,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(4, 0))
+
+    results_frame, content = admin_theme.create_scrollable_panel(
+        wrapper,
+        background=admin_theme.WINDOW_BG,
+    )
+    results_frame.pack(expand=True, fill="both", pady=(8, 0))
+
+    def refresh() -> None:
+        status_var.set("読み込み中…")
+
+        def worker() -> None:
+            try:
+                results = fetch_poll_results(poll_id, session=session)
+            except BackendApiError as exc:
+                root_ref.after(0, lambda: status_var.set(str(exc)))
+                return
+            except Exception as exc:  # noqa: BLE001
+                root_ref.after(0, lambda: status_var.set(str(exc)))
+                return
+            view = build_poll_results_view(results)
+
+            def apply() -> None:
+                if not win.winfo_exists():
+                    return
+                status_var.set("最終更新を反映しました（リアルタイム更新なし）。")
+                _render_poll_results(content, view)
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    buttons = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    buttons.pack(fill="x", pady=(10, 0))
+    admin_theme.create_button(
+        buttons,
+        text="更新",
+        command=refresh,
+        variant="primary",
+    ).pack(side="left", expand=True, fill="x")
+    admin_theme.create_button(
+        buttons,
+        text="閉じる",
+        command=on_close,
+        variant="secondary",
+    ).pack(side="left", expand=True, fill="x", padx=(10, 0))
+
+    refresh()
+    _center_window_on_monitor(win, root_ref)
+    win.after(50, lambda: _safe_set_topmost(win))
+
+
+def _safe_set_topmost(win: tk.Toplevel) -> None:
+    try:
+        if win.winfo_exists():
+            set_always_on_top(win.winfo_id())
+    except (tk.TclError, RuntimeError):
+        pass
+
+
 def _display_order_button_text(order: str) -> str:
     # 押すと反対の並びに切り替わるので、現在の並びとは逆のラベルを出す。
     return "時系列順に表示" if order == "bookmark" else "リアクション順に表示"
@@ -942,6 +1529,13 @@ def create_menu_window(
         variant="secondary",
     )
     display_order_button.pack(fill="x", pady=(0, 10))
+
+    admin_theme.create_button(
+        buttons,
+        text="アンケート",
+        command=lambda: _open_poll_window(root_ref),
+        variant="secondary",
+    ).pack(fill="x", pady=(0, 10))
 
     def export_dialog(fmt: str) -> None:
         if not state.message_log:

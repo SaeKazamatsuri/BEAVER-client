@@ -40,12 +40,16 @@ from state import app_state as state
 from ui.admin_cards import (
     build_comment_history_rows,
     build_comment_history_signature,
+    build_poll_results_view,
     build_transcription_timeline,
 )
 from ui.file_utils import build_export_filename, sanitize_filename_component
 from ui.windows import toggle_comment_window_visibility
 from services.backend_api import (
+    BackendApiError,
     normalize_comment_item,
+    normalize_poll_item,
+    normalize_poll_results,
     parse_reaction_update_event,
 )
 
@@ -94,6 +98,144 @@ class ReactionUpdateParsingTests(unittest.TestCase):
             }
         )
         self.assertEqual(item["bookmark_count"], 2)
+
+
+class PollNormalizationTests(unittest.TestCase):
+    def test_normalize_poll_item(self) -> None:
+        item = normalize_poll_item(
+            {
+                "id": 5,
+                "session": "demo",
+                "question": "好きな色は？",
+                "options": ["赤", "青", "緑"],
+                "durationSec": 20,
+                "createdAt": "2026-03-10T00:00:00Z",
+            }
+        )
+        self.assertEqual(
+            item,
+            {
+                "id": 5,
+                "session": "demo",
+                "question": "好きな色は？",
+                "options": ["赤", "青", "緑"],
+                "duration_sec": 20,
+                "created_at": "2026-03-10T00:00:00Z",
+            },
+        )
+
+    def test_normalize_poll_results(self) -> None:
+        results = normalize_poll_results(
+            {
+                "pollId": 5,
+                "runId": 9,
+                "question": "好きな色は？",
+                "options": ["赤", "青"],
+                "durationSec": 20,
+                "startedAt": "2026-03-10T00:00:00.000Z",
+                "deliveredCount": 4,
+                "answerCount": 2,
+                "answerRate": 0.5,
+                "averageResponseMs": 1500.0,
+                "optionCounts": [1, 1],
+                "answers": [
+                    {
+                        "name": "Alice",
+                        "realName": "Alice Example",
+                        "optionIndex": 0,
+                        "responseMs": 1000,
+                        "clientElapsedMs": 900,
+                        "createdAt": "2026-03-10T00:00:01Z",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(results["poll_id"], 5)
+        self.assertEqual(results["run_id"], 9)
+        self.assertEqual(results["option_counts"], [1, 1])
+        self.assertEqual(results["answer_rate"], 0.5)
+        self.assertEqual(results["average_response_ms"], 1500.0)
+        self.assertEqual(results["answers"][0]["option_index"], 0)
+        self.assertEqual(results["answers"][0]["client_elapsed_ms"], 900)
+
+    def test_normalize_poll_results_allows_null_average(self) -> None:
+        results = normalize_poll_results(
+            {
+                "pollId": 1,
+                "runId": 1,
+                "question": "Q",
+                "options": ["A", "B"],
+                "durationSec": 10,
+                "startedAt": "2026-03-10T00:00:00.000Z",
+                "deliveredCount": 0,
+                "answerCount": 0,
+                "answerRate": 0.0,
+                "averageResponseMs": None,
+                "optionCounts": [0, 0],
+                "answers": [],
+            }
+        )
+        self.assertIsNone(results["average_response_ms"])
+
+    def test_normalize_poll_item_rejects_non_string_option(self) -> None:
+        with self.assertRaises(BackendApiError):
+            normalize_poll_item(
+                {
+                    "id": 1,
+                    "session": "demo",
+                    "question": "Q",
+                    "options": ["A", 2],
+                    "durationSec": 10,
+                    "createdAt": "2026-03-10T00:00:00Z",
+                }
+            )
+
+
+class BuildPollResultsViewTests(unittest.TestCase):
+    def test_builds_view_with_percentages(self) -> None:
+        view = build_poll_results_view(
+            {
+                "question": "好きな色は？",
+                "options": ["赤", "青", "緑"],
+                "option_counts": [3, 1, 0],
+                "answer_count": 4,
+                "delivered_count": 5,
+                "answer_rate": 0.8,
+                "average_response_ms": 2000.0,
+                "answers": [
+                    {"name": "Alice", "option_index": 0, "response_ms": 1500},
+                    {"name": "Bob", "option_index": 2, "response_ms": 2500},
+                ],
+            }
+        )
+        self.assertEqual(view.question, "好きな色は？")
+        self.assertEqual(len(view.options), 3)
+        self.assertEqual(view.options[0].count, 3)
+        self.assertAlmostEqual(view.options[0].percentage, 75.0)
+        self.assertAlmostEqual(view.answer_rate_percent, 80.0)
+        self.assertEqual(view.delivered_count, 5)
+        self.assertEqual(view.answer_count, 4)
+        self.assertAlmostEqual(view.average_response_sec, 2.0)
+        self.assertEqual(view.answers[0].option_label, "赤")
+        self.assertEqual(view.answers[1].option_label, "緑")
+        self.assertAlmostEqual(view.answers[0].response_sec, 1.5)
+
+    def test_handles_zero_answers(self) -> None:
+        view = build_poll_results_view(
+            {
+                "question": "Q",
+                "options": ["A", "B"],
+                "option_counts": [0, 0],
+                "answer_count": 0,
+                "delivered_count": 0,
+                "answer_rate": 0.0,
+                "average_response_ms": None,
+                "answers": [],
+            }
+        )
+        self.assertEqual(view.options[0].percentage, 0.0)
+        self.assertIsNone(view.average_response_sec)
+        self.assertEqual(view.answers, [])
 
 
 class _CommentWindowDouble:

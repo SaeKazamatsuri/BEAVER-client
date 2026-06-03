@@ -542,6 +542,162 @@ def normalize_transcription_item(value: object) -> dict[str, object]:
     }
 
 
+# === アンケート（poll）===
+# 教員クライアントは未認証の /api/client/* 経由でアンケートを登録・配信・集計する。
+
+
+def fetch_polls(session: str) -> list[dict[str, object]]:
+    params: dict[str, str] = {}
+    if session.strip():
+        params["session"] = session
+    response = requests.get(
+        build_api_url("/api/client/polls"),
+        params=params,
+        timeout=BACKEND_HTTP_TIMEOUT_SEC,
+    )
+    payload = _parse_json_payload(response)
+    if response.status_code != requests.codes.ok:
+        if isinstance(payload, Mapping):
+            error_message = payload.get("error")
+            if isinstance(error_message, str) and error_message:
+                raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    raw_items = _require_list(payload, "polls")
+    return [normalize_poll_item(item) for item in raw_items]
+
+
+def create_poll(
+    session: str, question: str, options: Sequence[str], duration_sec: int
+) -> dict[str, object]:
+    url = build_api_url("/api/client/polls")
+    try:
+        response = requests.post(
+            url,
+            json={
+                "session": session,
+                "question": question,
+                "options": list(options),
+                "durationSec": duration_sec,
+            },
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    payload = _require_mapping(_parse_json_payload(response), "poll response")
+    if response.status_code != requests.codes.created:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_poll_item(payload)
+
+
+def start_poll(session: str, poll_id: int) -> dict[str, object]:
+    url = build_api_url("/api/client/polls/start")
+    try:
+        response = requests.post(
+            url,
+            json={"session": session, "pollId": poll_id},
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    payload = _require_mapping(_parse_json_payload(response), "poll start response")
+    if response.status_code != requests.codes.ok:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_poll_started(payload)
+
+
+def fetch_poll_results(
+    poll_id: int, run_id: int | None = None, session: str | None = None
+) -> dict[str, object]:
+    params: dict[str, str] = {"pollId": str(poll_id)}
+    if run_id is not None:
+        params["runId"] = str(run_id)
+    if session and session.strip():
+        params["session"] = session
+    response = requests.get(
+        build_api_url("/api/client/poll-results"),
+        params=params,
+        timeout=BACKEND_HTTP_TIMEOUT_SEC,
+    )
+    payload = _require_mapping(_parse_json_payload(response), "poll results")
+    if response.status_code != requests.codes.ok:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_poll_results(payload)
+
+
+def normalize_poll_item(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "poll")
+    return {
+        "id": _require_int(payload.get("id"), "id"),
+        "session": _require_string(payload.get("session"), "session"),
+        "question": _require_string(payload.get("question"), "question"),
+        "options": _require_string_list(payload.get("options"), "options"),
+        "duration_sec": _require_int(payload.get("durationSec"), "durationSec"),
+        "created_at": _require_string(payload.get("createdAt"), "createdAt"),
+    }
+
+
+def normalize_poll_started(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "poll started")
+    return {
+        "poll_id": _require_int(payload.get("pollId"), "pollId"),
+        "run_id": _require_int(payload.get("runId"), "runId"),
+        "session": _require_string(payload.get("session"), "session"),
+        "question": _require_string(payload.get("question"), "question"),
+        "options": _require_string_list(payload.get("options"), "options"),
+        "duration_sec": _require_int(payload.get("durationSec"), "durationSec"),
+        "started_at": _require_string(payload.get("startedAt"), "startedAt"),
+    }
+
+
+def normalize_poll_answer(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "poll answer")
+    return {
+        "name": _require_string(payload.get("name"), "name"),
+        "real_name": _require_string(payload.get("realName"), "realName"),
+        "option_index": _require_int(payload.get("optionIndex"), "optionIndex"),
+        "response_ms": _require_int(payload.get("responseMs"), "responseMs"),
+        "client_elapsed_ms": _require_nullable_int(
+            payload.get("clientElapsedMs"), "clientElapsedMs"
+        ),
+        "created_at": _require_string(payload.get("createdAt"), "createdAt"),
+    }
+
+
+def normalize_poll_results(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "poll results")
+    raw_counts = _require_list(payload.get("optionCounts"), "optionCounts")
+    option_counts = [_require_int(item, "optionCount") for item in raw_counts]
+    raw_answers = _require_list(payload.get("answers"), "answers")
+    answers = [normalize_poll_answer(item) for item in raw_answers]
+    return {
+        "poll_id": _require_int(payload.get("pollId"), "pollId"),
+        "run_id": _require_int(payload.get("runId"), "runId"),
+        "question": _require_string(payload.get("question"), "question"),
+        "options": _require_string_list(payload.get("options"), "options"),
+        "duration_sec": _require_int(payload.get("durationSec"), "durationSec"),
+        "started_at": _require_string(payload.get("startedAt"), "startedAt"),
+        "delivered_count": _require_int(
+            payload.get("deliveredCount"), "deliveredCount"
+        ),
+        "answer_count": _require_int(payload.get("answerCount"), "answerCount"),
+        "answer_rate": _require_number(payload.get("answerRate"), "answerRate"),
+        "average_response_ms": _require_nullable_number(
+            payload.get("averageResponseMs"), "averageResponseMs"
+        ),
+        "option_counts": option_counts,
+        "answers": answers,
+    }
+
+
 def _parse_json_payload(response: requests.Response) -> object:
     try:
         payload = response.json()
@@ -579,3 +735,31 @@ def _require_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise BackendApiError(f"{field_name} is invalid")
     return value
+
+
+def _require_nullable_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _require_int(value, field_name)
+
+
+def _require_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BackendApiError(f"{field_name} is invalid")
+    return float(value)
+
+
+def _require_nullable_number(value: object, field_name: str) -> float | None:
+    if value is None:
+        return None
+    return _require_number(value, field_name)
+
+
+def _require_string_list(value: object, field_name: str) -> list[str]:
+    items = _require_list(value, field_name)
+    result: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise BackendApiError(f"{field_name} is invalid")
+        result.append(item)
+    return result
