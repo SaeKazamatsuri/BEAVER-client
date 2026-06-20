@@ -16,17 +16,13 @@ from services.backend_api import (
     start_poll,
 )
 from services.events import connect_session, disconnect_session
-from services.transcription_service import stop_transcription_service
 from state import app_state as state
 from ui.admin_cards import (
-    AdminListCard,
     CommentHistoryRow,
     PollResultsView,
     build_comment_history_rows,
     build_comment_history_signature,
     build_poll_results_view,
-    build_transcription_timeline,
-    format_timestamp as _format_timestamp,
     string_value as _string_value,
 )
 from ui.file_utils import build_export_filename
@@ -194,140 +190,6 @@ def _create_titled_card(
     return card
 
 
-def _render_card_list(
-    parent: tk.Frame,
-    cards: Sequence[AdminListCard],
-    *,
-    empty_message: str,
-) -> None:
-    for child in parent.winfo_children():
-        child.destroy()
-
-    if not cards:
-        tk.Label(
-            parent,
-            text=empty_message,
-            bg=admin_theme.WINDOW_BG,
-            fg=admin_theme.SUBTLE_TEXT_COLOR,
-            justify="left",
-            wraplength=640,
-            anchor="w",
-            padx=12,
-            pady=20,
-            font=admin_theme.BODY_FONT,
-        ).pack(fill="x")
-        return
-
-    for entry in cards:
-        palette = admin_theme.get_list_card_palette(entry.kind)
-        card = admin_theme.create_card(
-            parent,
-            background=palette.card_background,
-            padx=16,
-            pady=14,
-        )
-        card.pack(fill="x", padx=8, pady=6)
-
-        header = tk.Frame(card, bg=palette.card_background)
-        header.pack(fill="x")
-
-        tk.Label(
-            header,
-            text=entry.tag_text,
-            bg=palette.tag_background,
-            fg=palette.accent,
-            padx=10,
-            pady=2,
-            font=admin_theme.SMALL_BOLD_FONT,
-        ).pack(side="left")
-
-        tk.Label(
-            header,
-            text=entry.title or "-",
-            bg=palette.card_background,
-            fg=admin_theme.TITLE_COLOR,
-            font=admin_theme.CARD_TITLE_FONT,
-        ).pack(side="left", padx=(10, 0))
-
-        tk.Label(
-            header,
-            text=entry.timestamp,
-            bg=palette.card_background,
-            fg=admin_theme.MUTED_TEXT_COLOR,
-            font=admin_theme.SMALL_FONT,
-        ).pack(side="right")
-
-        tk.Label(
-            card,
-            text=entry.body or "-",
-            bg=palette.card_background,
-            fg=admin_theme.TEXT_COLOR,
-            justify="left",
-            anchor="w",
-            wraplength=620,
-            padx=2,
-            pady=10,
-            font=admin_theme.BODY_FONT,
-        ).pack(fill="x")
-
-
-def _render_transcription_waveform(
-    canvas: tk.Canvas,
-    points: Sequence[float],
-) -> None:
-    if not canvas.winfo_exists():
-        return
-
-    canvas.delete("all")
-    width = max(int(canvas.winfo_width()), 640)
-    height = max(int(canvas.winfo_height()), int(canvas.cget("height")), 110)
-    mid_y = height / 2.0
-
-    canvas.create_line(
-        0,
-        mid_y,
-        width,
-        mid_y,
-        fill=admin_theme.BORDER_COLOR,
-        width=1,
-    )
-
-    if not points:
-        canvas.create_text(
-            width / 2.0,
-            mid_y,
-            text="マイク入力待機中",
-            fill=admin_theme.MUTED_TEXT_COLOR,
-            font=admin_theme.SMALL_FONT,
-        )
-        return
-
-    if len(points) == 1:
-        y = mid_y - (float(points[0]) * (height * 0.42))
-        canvas.create_line(
-            0,
-            y,
-            width,
-            y,
-            fill="#0f766e",
-            width=2,
-            smooth=True,
-        )
-        return
-
-    x_step = width / float(len(points) - 1)
-    coordinates: list[float] = []
-    for index, point in enumerate(points):
-        coordinates.append(index * x_step)
-        coordinates.append(mid_y - (float(point) * (height * 0.42)))
-    canvas.create_line(
-        *coordinates,
-        fill="#0f766e",
-        width=2,
-        smooth=True,
-    )
-
-
 def _render_comment_history_rows(
     parent: tk.Frame,
     rows: Sequence[CommentHistoryRow],
@@ -476,204 +338,6 @@ def _open_history_window(root_ref: tk.Tk) -> None:
 
         win.after(500, refresh)
 
-    refresh()
-
-
-def _open_transcription_history_window(root_ref: tk.Tk) -> None:
-    if _focus_existing_window(state.transcription_history_window):
-        return
-
-    win = tk.Toplevel(root_ref)
-    state.transcription_history_window = win
-    win.title("文字起こし履歴")
-
-    def on_close() -> None:
-        try:
-            win.destroy()
-        finally:
-            state.transcription_history_window = None
-
-    win.protocol("WM_DELETE_WINDOW", on_close)
-
-    wrapper = admin_theme.create_window_shell(win, geometry="760x720")
-    _create_window_header(
-        wrapper,
-        title="文字起こし履歴",
-        description="文字起こし状態とイベントを、管理UI共通のカードレイアウトで確認できます。",
-        wraplength=680,
-    )
-
-    _create_section_label(wrapper, "文字起こし状態")
-    summary = admin_theme.create_card(wrapper)
-    summary.pack(fill="x", pady=(10, 14))
-
-    session_var = tk.StringVar(value="現在のセッション: なし")
-    badge_var = tk.StringVar(value="未接続")
-    success_var = tk.StringVar(value="最終成功: -")
-    error_var = tk.StringVar(value="最終エラー: -")
-
-    header = tk.Frame(summary, bg=admin_theme.SURFACE_BG)
-    header.pack(fill="x")
-
-    tk.Label(
-        header,
-        textvariable=session_var,
-        bg=admin_theme.SURFACE_BG,
-        fg=admin_theme.TITLE_COLOR,
-        font=admin_theme.CARD_TITLE_FONT,
-        anchor="w",
-    ).pack(side="left")
-
-    badge_label = admin_theme.create_badge(header, textvariable=badge_var)
-    badge_label.pack(side="right")
-
-    tk.Label(
-        summary,
-        textvariable=success_var,
-        bg=admin_theme.SURFACE_BG,
-        fg=admin_theme.TEXT_COLOR,
-        anchor="w",
-        justify="left",
-        font=admin_theme.SMALL_FONT,
-        pady=8,
-    ).pack(fill="x")
-
-    tk.Label(
-        summary,
-        textvariable=error_var,
-        bg=admin_theme.SURFACE_BG,
-        fg=admin_theme.TEXT_COLOR,
-        anchor="w",
-        justify="left",
-        wraplength=660,
-        font=admin_theme.SMALL_FONT,
-    ).pack(fill="x")
-
-    _create_section_label(wrapper, "マイク入力")
-    waveform_card = admin_theme.create_card(wrapper)
-    waveform_card.pack(fill="x", pady=(10, 14))
-
-    waveform_state_var = tk.StringVar(value="入力待機中")
-    tk.Label(
-        waveform_card,
-        text="PCマイクの入力波形",
-        bg=admin_theme.SURFACE_BG,
-        fg=admin_theme.TITLE_COLOR,
-        font=admin_theme.CARD_TITLE_FONT,
-        anchor="w",
-    ).pack(fill="x")
-    tk.Label(
-        waveform_card,
-        textvariable=waveform_state_var,
-        bg=admin_theme.SURFACE_BG,
-        fg=admin_theme.SUBTLE_TEXT_COLOR,
-        font=admin_theme.SMALL_FONT,
-        anchor="w",
-        pady=6,
-    ).pack(fill="x")
-    waveform_canvas = tk.Canvas(
-        waveform_card,
-        bg="#f8fafc",
-        highlightbackground=admin_theme.BORDER_COLOR,
-        highlightthickness=1,
-        bd=0,
-        height=110,
-    )
-    waveform_canvas.pack(fill="x")
-
-    _create_section_label(wrapper, "タイムライン")
-    timeline_frame, content = admin_theme.create_scrollable_panel(
-        wrapper,
-        background=admin_theme.WINDOW_BG,
-    )
-    timeline_frame.pack(expand=True, fill="both", pady=(10, 0))
-
-    last_signature: list[object | None] = [None]
-    last_waveform_signature: list[tuple[float, ...] | None] = [None]
-
-    def refresh_waveform() -> None:
-        if not win.winfo_exists():
-            return
-
-        points = state.snapshot_transcription_audio_waveform()
-        visible_points = points[-240:]
-        rounded_signature = tuple(round(point, 3) for point in visible_points)
-        if rounded_signature != last_waveform_signature[0]:
-            _render_transcription_waveform(waveform_canvas, visible_points)
-            recent_peak = max((abs(point) for point in visible_points[-64:]), default=0.0)
-            waveform_state_var.set(
-                "入力を検出しています" if recent_peak >= 0.05 else "入力待機中"
-            )
-            last_waveform_signature[0] = rounded_signature
-        win.after(100, refresh_waveform)
-
-    def refresh() -> None:
-        if not win.winfo_exists():
-            return
-
-        status, items, events = state.snapshot_transcription_history()
-        signature = (
-            _string_value(status.get("badge")),
-            _string_value(status.get("session")),
-            _string_value(status.get("last_success_at")),
-            _string_value(status.get("last_error_at")),
-            _string_value(status.get("last_error_message")),
-            len(items),
-            len(events),
-            tuple(
-                (
-                    item.get("id"),
-                    _string_value(item.get("created_at")),
-                    _string_value(item.get("text")),
-                )
-                for item in items[-5:]
-            ),
-            tuple(
-                (
-                    _string_value(event.get("event")),
-                    _string_value(event.get("created_at")),
-                )
-                for event in events[-5:]
-            ),
-        )
-
-        if signature != last_signature[0]:
-            session_name = _string_value(status.get("session")) or "なし"
-            session_var.set(f"現在のセッション: {session_name}")
-
-            badge = _string_value(status.get("badge")) or "未接続"
-            badge_var.set(badge)
-            admin_theme.update_badge(badge_label, badge)
-
-            success_var.set(
-                f"最終成功: {_format_timestamp(status.get('last_success_at'))}"
-            )
-
-            last_error_at = _format_timestamp(status.get("last_error_at"))
-            last_error_message = _string_value(status.get("last_error_message"))
-            if last_error_at == "-" and not last_error_message:
-                error_text = "最終エラー: -"
-            elif last_error_message:
-                error_text = f"最終エラー: {last_error_at} / {last_error_message}"
-            else:
-                error_text = f"最終エラー: {last_error_at}"
-            error_var.set(error_text)
-
-            empty_message = (
-                "現在セッション未接続のため、状態イベントのみ表示します。"
-                if not _string_value(status.get("session"))
-                else "まだ文字起こし履歴はありません。"
-            )
-            _render_card_list(
-                content,
-                build_transcription_timeline(items, events),
-                empty_message=empty_message,
-            )
-            last_signature[0] = signature
-
-        win.after(500, refresh)
-
-    refresh_waveform()
     refresh()
 
 
@@ -1395,10 +1059,12 @@ def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> No
             try:
                 results = fetch_poll_results(poll_id, session=session)
             except BackendApiError as exc:
-                root_ref.after(0, lambda: status_var.set(str(exc)))
+                message = str(exc)
+                root_ref.after(0, lambda: status_var.set(message))
                 return
             except Exception as exc:  # noqa: BLE001
-                root_ref.after(0, lambda: status_var.set(str(exc)))
+                message = str(exc)
+                root_ref.after(0, lambda: status_var.set(message))
                 return
             view = build_poll_results_view(results)
 
@@ -1456,7 +1122,7 @@ def create_menu_window(
 
     wrapper = admin_theme.create_window_shell(
         menu,
-        geometry="430x470",
+        geometry="430x430",
         topmost=True,
     )
 
@@ -1506,13 +1172,12 @@ def create_menu_window(
         right_text="実験",
         right_command=lambda: _open_experiment_window(root_ref, refresh_layout_callback),
     )
-    _create_dashboard_button_row(
+    admin_theme.create_button(
         buttons,
-        left_text="コメント履歴",
-        left_command=lambda: _open_history_window(root_ref),
-        right_text="文字起こし履歴",
-        right_command=lambda: _open_transcription_history_window(root_ref),
-    )
+        text="コメント履歴",
+        command=lambda: _open_history_window(root_ref),
+        variant="secondary",
+    ).pack(fill="x", pady=(0, 10))
 
     def toggle_display_order() -> None:
         next_order = "chronological" if state.display_order == "bookmark" else "bookmark"
@@ -1601,7 +1266,6 @@ def create_menu_window(
     def confirm_exit() -> None:
         if messagebox.askokcancel("終了", "アプリを終了しますか？"):
             disconnect_session(show_status=False)
-            stop_transcription_service()
             root_ref.destroy()
 
     comment_window_hidden = [False]

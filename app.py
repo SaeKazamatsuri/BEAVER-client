@@ -4,10 +4,6 @@ import queue
 import tkinter as tk
 
 from services.events import disconnect_session
-from services.transcription_service import (
-    start_transcription_service,
-    stop_transcription_service,
-)
 from state import app_state as state
 from ui.comment_ui import COMMENT_COLUMN_BG, CommentListView, comment_entry_from_message
 from ui.display_layout import DisplayLayoutController
@@ -40,12 +36,6 @@ def main() -> None:
     layout_controller.apply_layout()
     root.update()
     set_always_on_top(root.winfo_id())
-    start_transcription_service(
-        lambda: state.CURRENT_SESSION if state.session_ready else None,
-        state.record_transcription_service_update,
-        None,
-        state.append_transcription_audio_waveform,
-    )
 
     wrapper = tk.Frame(root, bg=COMMENT_COLUMN_BG)
     wrapper.pack(expand=True, fill="both")
@@ -103,7 +93,6 @@ def main() -> None:
 
     def on_close() -> None:
         disconnect_session(show_status=False)
-        stop_transcription_service()
         stop_overlay()
         root.destroy()
 

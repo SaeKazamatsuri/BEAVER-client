@@ -496,10 +496,10 @@ class CommentListView(tk.Frame):
     def clear(self) -> None:
         self._comments.clear()
         self._reset_ai_question_state()
-        self._canvas.delete("comment_card")
-        self._header_canvas.delete("ai_question_card")
-        self._header_canvas.configure(height=0)
-        self.after_idle(self._refresh_scrollregion)
+        # 即時 delete は「削除＝即時／再描画＝遅延」の時間差で空フレームを生み、
+        # 吹き出しのちらつきの原因になる。画面消去も _redraw に一任し、
+        # delete→再生成を 1 フレームに集約する。
+        self._schedule_redraw()
 
     def set_comments(self, comments: Sequence[CommentEntry]) -> None:
         now = time.time()

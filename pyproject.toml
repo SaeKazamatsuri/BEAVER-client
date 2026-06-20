@@ -7,7 +7,6 @@ dependencies = [
     "pyinstaller",
     "requests",
     "screeninfo",
-    "sounddevice",
     "wsproto",
 ]
 

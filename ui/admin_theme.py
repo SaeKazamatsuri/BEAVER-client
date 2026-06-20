@@ -89,11 +89,6 @@ def get_list_card_palette(kind: str) -> ListCardPalette:
             tag_background="#ffedd5",
             card_background=SURFACE_ALT_BG,
         ),
-        "transcription": ListCardPalette(
-            accent="#0f766e",
-            tag_background="#ccfbf1",
-            card_background=SURFACE_BG,
-        ),
         "status": ListCardPalette(
             accent="#1d4ed8",
             tag_background="#dbeafe",

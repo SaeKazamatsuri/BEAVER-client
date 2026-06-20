@@ -41,7 +41,6 @@ from ui.admin_cards import (
     build_comment_history_rows,
     build_comment_history_signature,
     build_poll_results_view,
-    build_transcription_timeline,
 )
 from ui.file_utils import build_export_filename, sanitize_filename_component
 from ui.windows import toggle_comment_window_visibility
@@ -366,105 +365,6 @@ class BuildCommentHistoryRowsTests(unittest.TestCase):
         self.assertEqual(
             signature, (("10:15", "Bob", "hello", "2026-03-10T01:15:00Z", 0),)
         )
-
-
-class BuildTranscriptionTimelineTests(unittest.TestCase):
-    def test_sorts_newest_items_first(self) -> None:
-        items: list[dict[str, object]] = [
-            {
-                "id": 1,
-                "created_at": "2026-03-10T00:01:00Z",
-                "text": "old text",
-            },
-            {
-                "id": 2,
-                "created_at": "2026-03-10T00:03:00Z",
-                "text": "latest text",
-            },
-        ]
-        events: list[dict[str, object]] = [
-            {
-                "created_at": "2026-03-10T00:02:00Z",
-                "event": "状態更新",
-                "detail": "waiting",
-            }
-        ]
-
-        timeline = build_transcription_timeline(items, events)
-
-        self.assertEqual(
-            [entry.kind for entry in timeline],
-            ["transcription", "status", "transcription"],
-        )
-        self.assertEqual(timeline[0].body, "latest text")
-        self.assertEqual(timeline[1].body, "waiting")
-        self.assertEqual(timeline[2].body, "old text")
-
-
-class TranscriptionStateTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._status = dict(state.transcription_status)
-        self._items = [dict(item) for item in state.transcription_items]
-        self._events = [dict(event) for event in state.transcription_events]
-        self._waveform = list(state.transcription_audio_waveform)
-
-    def tearDown(self) -> None:
-        state.transcription_status.clear()
-        state.transcription_status.update(self._status)
-        state.transcription_items.clear()
-        state.transcription_items.extend(self._items)
-        state.transcription_events.clear()
-        state.transcription_events.extend(self._events)
-        state.transcription_audio_waveform.clear()
-        state.transcription_audio_waveform.extend(self._waveform)
-
-    def test_record_transcription_service_update_hides_upload_events(self) -> None:
-        state.set_transcription_session("demo")
-
-        state.record_transcription_service_update(
-            {
-                "state": "uploading",
-                "process_alive": True,
-                "session": "demo",
-                "last_success_at": None,
-                "last_error_at": None,
-                "last_error_message": None,
-            },
-            {
-                "event": "保存完了",
-                "detail": "hidden",
-                "created_at": "2026-03-10T00:00:00Z",
-                "session": "demo",
-            },
-        )
-        state.record_transcription_service_update(
-            {
-                "state": "recording",
-                "process_alive": True,
-                "session": "demo",
-                "last_success_at": None,
-                "last_error_at": None,
-                "last_error_message": None,
-            },
-            {
-                "event": "録音開始",
-                "detail": "visible",
-                "created_at": "2026-03-10T00:01:00Z",
-                "session": "demo",
-            },
-        )
-
-        _status, _items, events = state.snapshot_transcription_history()
-
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["event"], "録音開始")
-
-    def test_set_transcription_session_clears_waveform(self) -> None:
-        state.append_transcription_audio_waveform([0.2, -0.4])
-
-        state.set_transcription_session("demo")
-
-        self.assertEqual(state.snapshot_transcription_audio_waveform(), [])
 
 
 class ExportFilenameTests(unittest.TestCase):
