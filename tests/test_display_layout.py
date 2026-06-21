@@ -27,7 +27,7 @@ class _RootDouble:
         self.geometry_calls.append(new_geometry)
 
 
-class _OverlayDouble:
+class _RectDouble:
     def __init__(self) -> None:
         self.rect_calls: list[WindowRect] = []
 
@@ -36,14 +36,16 @@ class _OverlayDouble:
 
 
 class BuildLayoutTests(unittest.TestCase):
-    def test_comment_mode_uses_right_quarter_for_both_windows(self) -> None:
+    def test_comment_mode_uses_right_quarter_and_poll_results_use_left_area(self) -> None:
         monitor = MonitorRect(width=1920, height=1080, x=0, y=0)
 
         snapshot = build_layout(monitor, "comment")
 
-        expected_rect = WindowRect(width=480, height=1080, x=1440, y=0)
-        self.assertEqual(snapshot.comment_rect, expected_rect)
-        self.assertEqual(snapshot.overlay_rect, expected_rect)
+        expected_comment_rect = WindowRect(width=480, height=1080, x=1440, y=0)
+        expected_poll_results_rect = WindowRect(width=1440, height=1080, x=0, y=0)
+        self.assertEqual(snapshot.comment_rect, expected_comment_rect)
+        self.assertEqual(snapshot.overlay_rect, expected_comment_rect)
+        self.assertEqual(snapshot.poll_results_rect, expected_poll_results_rect)
         self.assertEqual(snapshot.stamp_area_mode, "comment")
 
     def test_non_comment_mode_still_uses_right_quarter(self) -> None:
@@ -54,6 +56,10 @@ class BuildLayoutTests(unittest.TestCase):
         expected_rect = WindowRect(width=480, height=1080, x=1540, y=20)
         self.assertEqual(snapshot.comment_rect, expected_rect)
         self.assertEqual(snapshot.overlay_rect, expected_rect)
+        self.assertEqual(
+            snapshot.poll_results_rect,
+            WindowRect(width=1440, height=1080, x=100, y=20),
+        )
         self.assertEqual(snapshot.stamp_area_mode, "comment")
 
 
@@ -64,10 +70,12 @@ class DisplayLayoutControllerTests(unittest.TestCase):
             _FakeMonitor(width=1920, height=1080, x=1920, y=0),
         ]
         root = _RootDouble()
-        overlay = _OverlayDouble()
+        overlay = _RectDouble()
+        poll_results = _RectDouble()
         controller = DisplayLayoutController(
             root=root,
             overlay_geometry_updater=overlay.update,
+            poll_results_geometry_updater=poll_results.update,
             stamp_area_mode_getter=lambda: "comment",
             monitor_provider=lambda: monitors,
         )
@@ -82,8 +90,10 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         self.assertEqual(initial_snapshot.comment_rect.x, 1440)
         self.assertEqual(switched_snapshot.comment_rect.x, 3360)
         self.assertEqual(switched_snapshot.overlay_rect.x, 3360)
+        self.assertEqual(switched_snapshot.poll_results_rect.x, 1920)
         self.assertEqual(root.geometry_calls[-1], switched_snapshot.comment_rect.to_geometry())
         self.assertEqual(overlay.rect_calls[-1], switched_snapshot.overlay_rect)
+        self.assertEqual(poll_results.rect_calls[-1], switched_snapshot.poll_results_rect)
 
     def test_clamps_monitor_index_when_monitor_count_shrinks(self) -> None:
         monitors = [
@@ -91,7 +101,7 @@ class DisplayLayoutControllerTests(unittest.TestCase):
             _FakeMonitor(width=1920, height=1080, x=1920, y=0),
         ]
         root = _RootDouble()
-        overlay = _OverlayDouble()
+        overlay = _RectDouble()
 
         def provider() -> list[_FakeMonitor]:
             return list(monitors)
@@ -113,6 +123,7 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         self.assertEqual(controller.active_monitor_index, 0)
         self.assertEqual(snapshot.comment_rect, WindowRect(width=480, height=1080, x=1440, y=0))
         self.assertEqual(snapshot.overlay_rect, snapshot.comment_rect)
+        self.assertEqual(snapshot.poll_results_rect, WindowRect(width=1440, height=1080, x=0, y=0))
 
     def test_switch_display_applies_same_snapshot_to_root_and_overlay(self) -> None:
         monitors = [
@@ -120,10 +131,12 @@ class DisplayLayoutControllerTests(unittest.TestCase):
             _FakeMonitor(width=1920, height=1080, x=1920, y=0),
         ]
         root = _RootDouble()
-        overlay = _OverlayDouble()
+        overlay = _RectDouble()
+        poll_results = _RectDouble()
         controller = DisplayLayoutController(
             root=root,
             overlay_geometry_updater=overlay.update,
+            poll_results_geometry_updater=poll_results.update,
             stamp_area_mode_getter=lambda: "comment",
             monitor_provider=lambda: monitors,
         )
@@ -131,6 +144,7 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         controller.apply_layout()
         root.geometry_calls.clear()
         overlay.rect_calls.clear()
+        poll_results.rect_calls.clear()
 
         snapshot = controller.switch_display()
 
@@ -138,6 +152,7 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(root.geometry_calls, [snapshot.comment_rect.to_geometry()])
         self.assertEqual(overlay.rect_calls, [snapshot.overlay_rect])
+        self.assertEqual(poll_results.rect_calls, [snapshot.poll_results_rect])
         self.assertEqual(controller.current_snapshot, snapshot)
 
     def test_refresh_layout_keeps_active_monitor_when_mode_input_changes(self) -> None:
@@ -147,10 +162,12 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         ]
         stamp_area_mode = ["comment"]
         root = _RootDouble()
-        overlay = _OverlayDouble()
+        overlay = _RectDouble()
+        poll_results = _RectDouble()
         controller = DisplayLayoutController(
             root=root,
             overlay_geometry_updater=overlay.update,
+            poll_results_geometry_updater=poll_results.update,
             stamp_area_mode_getter=lambda: stamp_area_mode[0],
             monitor_provider=lambda: monitors,
         )
@@ -159,6 +176,7 @@ class DisplayLayoutControllerTests(unittest.TestCase):
         stamp_area_mode[0] = "left75"
         root.geometry_calls.clear()
         overlay.rect_calls.clear()
+        poll_results.rect_calls.clear()
 
         left75_snapshot = controller.refresh_layout()
 
@@ -173,8 +191,13 @@ class DisplayLayoutControllerTests(unittest.TestCase):
             left75_snapshot.overlay_rect,
             WindowRect(width=480, height=1080, x=3360, y=0),
         )
+        self.assertEqual(
+            left75_snapshot.poll_results_rect,
+            WindowRect(width=1440, height=1080, x=1920, y=0),
+        )
         self.assertEqual(root.geometry_calls, [left75_snapshot.comment_rect.to_geometry()])
         self.assertEqual(overlay.rect_calls, [left75_snapshot.overlay_rect])
+        self.assertEqual(poll_results.rect_calls, [left75_snapshot.poll_results_rect])
 
 
 if __name__ == "__main__":

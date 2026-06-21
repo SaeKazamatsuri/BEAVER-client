@@ -6,7 +6,16 @@ import tkinter as tk
 
 from state import app_state as state
 from ui.admin_cards import build_poll_results_view
-from ui import admin_theme
+from ui.display_layout import WindowRect
+
+POLL_RESULTS_BG = "#f8fafc"
+POLL_RESULTS_FG = "#111827"
+POLL_RESULTS_MUTED_FG = "#475569"
+POLL_RESULTS_BAR_BG = "#dbeafe"
+POLL_RESULTS_BAR_FILL = "#f97316"
+POLL_RESULTS_BORDER = "#0f172a"
+
+_current_geometry: WindowRect | None = None
 
 
 def sync_poll_results_overlay(root: tk.Tk, results: Mapping[str, object] | None) -> None:
@@ -18,86 +27,119 @@ def sync_poll_results_overlay(root: tk.Tk, results: Mapping[str, object] | None)
     if win is None or not _exists(win):
         win = tk.Toplevel(root)
         state.poll_results_overlay_window = win
+        win.title("アンケート結果")
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        win.configure(bg="#111827")
+        win.configure(bg=POLL_RESULTS_BG)
     for child in win.winfo_children():
         child.destroy()
 
-    card = tk.Frame(win, bg="#ffffff", padx=22, pady=20, highlightthickness=2)
-    card.configure(highlightbackground="#111827", highlightcolor="#111827")
-    card.pack(expand=True, fill="both", padx=2, pady=2)
+    body = tk.Frame(win, bg=POLL_RESULTS_BG, padx=56, pady=44)
+    body.pack(expand=True, fill="both")
 
     tk.Label(
-        card,
-        text="投票結果",
-        bg="#ffffff",
-        fg="#111827",
-        font=("Yu Gothic UI", -20, "bold"),
+        body,
+        text="アンケート結果",
+        bg=POLL_RESULTS_BG,
+        fg=POLL_RESULTS_FG,
+        font=("Yu Gothic UI", -44, "bold"),
         anchor="w",
     ).pack(fill="x")
     tk.Label(
-        card,
+        body,
         text=view.question,
-        bg="#ffffff",
-        fg="#111827",
-        font=("Yu Gothic UI", -14, "bold"),
+        bg=POLL_RESULTS_BG,
+        fg=POLL_RESULTS_FG,
+        font=("Yu Gothic UI", -34, "bold"),
         justify="left",
         anchor="w",
-        wraplength=420,
-        pady=8,
-    ).pack(fill="x")
+        wraplength=max(520, _target_width(root) - 160),
+    ).pack(fill="x", pady=(18, 10))
     tk.Label(
-        card,
+        body,
         text=f"回答率: {view.answer_rate_percent:.1f}%（{view.answer_count} / {view.delivered_count} 人）",
-        bg="#ffffff",
-        fg="#4b5563",
-        font=admin_theme.SMALL_FONT,
+        bg=POLL_RESULTS_BG,
+        fg=POLL_RESULTS_MUTED_FG,
+        font=("Yu Gothic UI", -24, "bold"),
         anchor="w",
-    ).pack(fill="x", pady=(0, 12))
+    ).pack(fill="x", pady=(0, 28))
 
-    chart = tk.Frame(card, bg="#ffffff")
+    chart = tk.Frame(body, bg=POLL_RESULTS_BG)
     chart.pack(fill="x")
     max_count = max((option.count for option in view.options), default=0)
     for option in view.options:
-        row = tk.Frame(chart, bg="#ffffff")
-        row.pack(fill="x", pady=5)
+        row = tk.Frame(chart, bg=POLL_RESULTS_BG)
+        row.pack(fill="x", pady=13)
         row.grid_columnconfigure(2, weight=1)
         tk.Label(
             row,
             text=option.label,
-            bg="#ffffff",
-            fg="#111827",
-            font=admin_theme.SMALL_FONT,
+            bg=POLL_RESULTS_BG,
+            fg=POLL_RESULTS_FG,
+            font=("Yu Gothic UI", -26, "bold"),
             anchor="e",
             justify="right",
-            width=14,
-            wraplength=120,
-        ).grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        tk.Frame(row, bg="#111827", width=2, height=28).grid(
+            width=12,
+            wraplength=260,
+        ).grid(row=0, column=0, sticky="nsew", padx=(0, 22))
+        tk.Frame(row, bg=POLL_RESULTS_BORDER, width=4, height=64).grid(
             row=0, column=1, sticky="ns"
         )
-        bar_area = tk.Frame(row, bg="#ffffff", height=28)
-        bar_area.grid(row=0, column=2, sticky="ew", padx=(10, 0))
         width_ratio = (option.count / max_count) if max_count > 0 else 0.0
-        bar = tk.Frame(bar_area, bg="#ffd8bd", highlightthickness=1)
-        bar.configure(highlightbackground="#374151", highlightcolor="#374151")
-        bar.place(relx=0, rely=0.14, relheight=0.72, relwidth=max(0.0, width_ratio))
-        tk.Label(
-            bar_area,
-            text=f"{option.count}票 / {option.percentage:.1f}%",
-            bg="#ffffff",
-            fg="#111827",
-            font=admin_theme.SMALL_BOLD_FONT,
-            anchor="w",
-        ).pack(fill="both", padx=8)
+        bar_canvas = tk.Canvas(
+            row,
+            bg=POLL_RESULTS_BAR_BG,
+            height=64,
+            borderwidth=0,
+            highlightthickness=0,
+            relief="flat",
+        )
+        bar_canvas.grid(row=0, column=2, sticky="ew", padx=(20, 0))
+
+        count_text = f"{option.count}票 / {option.percentage:.1f}%"
+
+        def draw_bar(
+            event: tk.Event,
+            *,
+            canvas: tk.Canvas = bar_canvas,
+            ratio: float = width_ratio,
+            text: str = count_text,
+        ) -> None:
+            width = max(1, int(event.width))
+            canvas.delete("bar")
+            canvas.create_rectangle(
+                0,
+                0,
+                int(width * max(0.0, ratio)),
+                64,
+                fill=POLL_RESULTS_BAR_FILL,
+                outline="",
+                tags=("bar",),
+            )
+            canvas.create_text(
+                18,
+                32,
+                text=text,
+                fill=POLL_RESULTS_FG,
+                font=("Yu Gothic UI", -24, "bold"),
+                anchor="w",
+                tags=("bar",),
+            )
+
+        bar_canvas.bind("<Configure>", draw_bar)
 
     win.update_idletasks()
-    width = min(max(460, win.winfo_reqwidth()), max(460, root.winfo_width() - 24))
-    height = min(max(280, win.winfo_reqheight()), max(280, root.winfo_height() - 24))
-    left = root.winfo_rootx() + max(0, (root.winfo_width() - width) // 2)
-    top = root.winfo_rooty() + max(0, (root.winfo_height() - height) // 2)
-    win.geometry(f"{width}x{height}+{left}+{top}")
+    _apply_geometry(root, win)
+    win.lift()
+
+
+def update_poll_results_overlay_geometry(rect: WindowRect) -> None:
+    global _current_geometry
+    _current_geometry = rect
+    win = state.poll_results_overlay_window
+    if win is None or not _exists(win):
+        return
+    win.geometry(rect.to_geometry())
     win.lift()
 
 
@@ -111,6 +153,24 @@ def _destroy_overlay() -> None:
             win.destroy()
     except Exception:
         pass
+
+
+def _target_width(root: tk.Tk) -> int:
+    if _current_geometry is not None:
+        return _current_geometry.width
+    return max(900, root.winfo_width() * 3)
+
+
+def _apply_geometry(root: tk.Tk, win: tk.Toplevel) -> None:
+    if _current_geometry is not None:
+        win.geometry(_current_geometry.to_geometry())
+        return
+
+    width = max(900, root.winfo_width() * 3)
+    height = max(520, root.winfo_height())
+    left = root.winfo_rootx() - width
+    top = root.winfo_rooty()
+    win.geometry(f"{width}x{height}+{left}+{top}")
 
 
 def _exists(win: tk.Toplevel) -> bool:

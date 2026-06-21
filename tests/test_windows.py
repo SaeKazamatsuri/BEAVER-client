@@ -43,7 +43,12 @@ from ui.admin_cards import (
     build_poll_results_view,
 )
 from ui.file_utils import build_export_filename, sanitize_filename_component
-from ui.windows import toggle_comment_window_visibility
+from ui.windows import (
+    _create_menu_child_window,
+    _open_history_window,
+    _show_async_error,
+    toggle_comment_window_visibility,
+)
 from services.backend_api import (
     BackendApiError,
     normalize_comment_item,
@@ -265,6 +270,31 @@ class _StringVarDouble:
         return self._value
 
 
+class _ParentDouble:
+    def __init__(self) -> None:
+        self.after_calls: list[tuple[int, object]] = []
+
+    def after(self, delay_ms: int, callback: object) -> None:
+        self.after_calls.append((delay_ms, callback))
+        if callable(callback):
+            callback()
+
+
+class _WindowDouble:
+    def __init__(self) -> None:
+        self.transient_calls: list[object] = []
+        self.destroy_calls = 0
+
+    def transient(self, parent: object) -> None:
+        self.transient_calls.append(parent)
+
+    def winfo_exists(self) -> bool:
+        return True
+
+    def destroy(self) -> None:
+        self.destroy_calls += 1
+
+
 class BuildCommentHistoryRowsTests(unittest.TestCase):
     def test_formats_text_comment_rows(self) -> None:
         messages: list[dict[str, object]] = [
@@ -432,6 +462,43 @@ class ToggleCommentWindowVisibilityTests(unittest.TestCase):
         self.assertEqual(window.deiconify_calls, 1)
         self.assertEqual(window.attributes_calls, [("-topmost", True)])
         set_topmost.assert_called_once_with(window.window_id)
+
+
+class MenuDialogParentTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        state.history_window = None
+
+    def test_create_menu_child_window_uses_menu_as_parent(self) -> None:
+        parent = _ParentDouble()
+        window = _WindowDouble()
+
+        with patch("ui.windows.tk.Toplevel", return_value=window) as toplevel:
+            result = _create_menu_child_window(parent)
+
+        self.assertIs(result, window)
+        toplevel.assert_called_once_with(parent)
+        self.assertEqual(window.transient_calls, [parent])
+
+    def test_show_async_error_passes_dialog_parent(self) -> None:
+        root = _ParentDouble()
+        parent = _ParentDouble()
+
+        with patch("ui.windows.messagebox.showerror") as showerror:
+            _show_async_error(root, parent, "失敗しました")
+
+        self.assertEqual(len(root.after_calls), 1)
+        showerror.assert_called_once_with("アンケート", "失敗しました", parent=parent)
+
+    def test_open_history_window_closes_existing_window(self) -> None:
+        parent = _ParentDouble()
+        existing = _WindowDouble()
+        state.history_window = existing
+
+        with patch("ui.windows._create_menu_child_window") as create_window:
+            _open_history_window(parent)
+
+        self.assertEqual(existing.destroy_calls, 1)
+        create_window.assert_not_called()
 
 
 if __name__ == "__main__":

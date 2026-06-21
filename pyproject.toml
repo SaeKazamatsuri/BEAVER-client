@@ -6,6 +6,7 @@ dependencies = [
     "pillow>=12.2.0",
     "pyinstaller",
     "requests",
+    "ruff>=0.15.18",
     "screeninfo",
     "wsproto",
 ]
@@ -17,3 +18,8 @@ members = [
 
 [tool.uv.sources]
 pyinstaller = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.410",
+]

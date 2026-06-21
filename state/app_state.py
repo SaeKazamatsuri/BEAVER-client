@@ -41,6 +41,7 @@ root: tk.Tk | None = None
 menu_status_var: tk.StringVar | None = None
 menu_session_var: tk.StringVar | None = None
 menu_current_session_var: tk.StringVar | None = None
+history_window: tk.Toplevel | None = None
 experiment_window: tk.Toplevel | None = None
 poll_window: tk.Toplevel | None = None
 poll_results_window: tk.Toplevel | None = None

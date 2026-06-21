@@ -123,6 +123,22 @@ def _focus_existing_window(window: tk.Toplevel | None) -> bool:
     return False
 
 
+def _create_menu_child_window(parent: tk.Misc) -> tk.Toplevel:
+    win = tk.Toplevel(parent)
+    try:
+        win.transient(parent)
+    except tk.TclError:
+        pass
+    return win
+
+
+def _place_child_window_on_menu_monitor(win: tk.Toplevel, menu_ref: tk.Misc) -> None:
+    try:
+        _center_window_on_monitor(win, menu_ref)
+    except tk.TclError:
+        pass
+
+
 def _create_window_header(
     parent: tk.Misc,
     *,
@@ -301,11 +317,31 @@ def _create_dashboard_button_row(
     ).pack(side="left", expand=True, fill="x", padx=(10, 0))
 
 
-def _open_history_window(root_ref: tk.Tk) -> None:
-    win = tk.Toplevel(root_ref)
+def _open_history_window(menu_ref: tk.Misc) -> None:
+    existing = state.history_window
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                existing.destroy()
+                return
+        except Exception:
+            pass
+        state.history_window = None
+
+    win = _create_menu_child_window(menu_ref)
+    state.history_window = win
     win.title("コメント履歴")
 
+    def on_close() -> None:
+        try:
+            win.destroy()
+        finally:
+            state.history_window = None
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
     wrapper = admin_theme.create_window_shell(win, geometry="760x720")
+    _place_child_window_on_menu_monitor(win, menu_ref)
     count_var = tk.StringVar(value="表示件数: 0 件")
     tk.Label(
         wrapper,
@@ -348,13 +384,13 @@ def _open_history_window(root_ref: tk.Tk) -> None:
 
 
 def _open_experiment_window(
-    root_ref: tk.Tk,
+    menu_ref: tk.Misc,
     _refresh_layout_callback: Callable[[], None],
 ) -> None:
     if _focus_existing_window(state.experiment_window):
         return
 
-    win = tk.Toplevel(root_ref)
+    win = _create_menu_child_window(menu_ref)
     state.experiment_window = win
     win.title("実験")
 
@@ -371,6 +407,7 @@ def _open_experiment_window(
         geometry="560x760",
         topmost=True,
     )
+    _place_child_window_on_menu_monitor(win, menu_ref)
     _create_window_header(
         wrapper,
         title="実験パラメータ",
@@ -550,10 +587,10 @@ def _current_session_name() -> str:
     return "default"
 
 
-def _show_async_error(root_ref: tk.Tk, message: str) -> None:
+def _show_async_error(root_ref: tk.Misc, parent: tk.Misc, message: str) -> None:
     def show() -> None:
         try:
-            messagebox.showerror("アンケート", message)
+            messagebox.showerror("アンケート", message, parent=parent)
         except Exception:
             pass
 
@@ -704,11 +741,11 @@ def _render_poll_list(
             ).pack(side="left", expand=True, fill="x", padx=(0, 6))
 
 
-def _open_poll_window(root_ref: tk.Tk) -> None:
+def _open_poll_window(root_ref: tk.Tk, menu_ref: tk.Misc) -> None:
     if _focus_existing_window(state.poll_window):
         return
 
-    win = tk.Toplevel(root_ref)
+    win = _create_menu_child_window(menu_ref)
     state.poll_window = win
     win.title("アンケート")
 
@@ -721,6 +758,7 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
     win.protocol("WM_DELETE_WINDOW", on_close)
 
     wrapper = admin_theme.create_window_shell(win, geometry="640x780", topmost=True)
+    _place_child_window_on_menu_monitor(win, menu_ref)
     _create_window_header(
         wrapper,
         title="アンケート",
@@ -793,19 +831,19 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
             try:
                 start_poll(session, poll_id)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001 - ネットワーク例外を UI に伝える
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             root_ref.after(
-                0, lambda: messagebox.showinfo("アンケート", "配信しました。")
+                0, lambda: messagebox.showinfo("アンケート", "配信しました。", parent=win)
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
     def open_results(poll_id: int) -> None:
-        _open_poll_results_window(root_ref, poll_id, _current_session_name())
+        _open_poll_results_window(menu_ref, poll_id, _current_session_name())
 
     def display_results(poll_id: int, target: str) -> None:
         session = _current_session_name()
@@ -814,13 +852,13 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
             try:
                 set_poll_results_display(session, poll_id, target)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             message = "非表示にしました。" if target == "none" else "結果表示を更新しました。"
-            root_ref.after(0, lambda: messagebox.showinfo("アンケート", message))
+            root_ref.after(0, lambda: messagebox.showinfo("アンケート", message, parent=win))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -831,10 +869,10 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
             try:
                 polls = fetch_polls(session)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
 
             def apply() -> None:
@@ -863,10 +901,10 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
         ]
         duration = int(round(float(duration_var.get())))
         if not question:
-            messagebox.showinfo("アンケート", "質問文を入力してください。")
+            messagebox.showinfo("アンケート", "質問文を入力してください。", parent=win)
             return
         if len(options) < 2:
-            messagebox.showinfo("アンケート", "選択肢を2個以上入力してください。")
+            messagebox.showinfo("アンケート", "選択肢を2個以上入力してください。", parent=win)
             return
         session = _current_session_name()
 
@@ -874,10 +912,10 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
             try:
                 create_poll(session, question, options, duration)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
 
             def apply() -> None:
@@ -1037,7 +1075,7 @@ def _render_poll_results(content: tk.Frame, view: PollResultsView) -> None:
         ).grid(row=0, column=2, sticky="ne", padx=(8, 0))
 
 
-def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> None:
+def _open_poll_results_window(menu_ref: tk.Misc, poll_id: int, session: str) -> None:
     # 別ポールの集計を開く場合は、既存の集計ウィンドウを作り直す。
     existing = state.poll_results_window
     if existing is not None:
@@ -1048,12 +1086,13 @@ def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> No
             pass
         state.poll_results_window = None
 
-    win = tk.Toplevel(root_ref)
+    win = _create_menu_child_window(menu_ref)
     state.poll_results_window = win
     win.title("アンケート集計")
     win.configure(bg=admin_theme.WINDOW_BG)
     win.geometry("520x680")
     win.attributes("-topmost", True)
+    _place_child_window_on_menu_monitor(win, menu_ref)
 
     def on_close() -> None:
         try:
@@ -1100,11 +1139,11 @@ def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> No
                 results = fetch_poll_results(poll_id, session=session)
             except BackendApiError as exc:
                 message = str(exc)
-                root_ref.after(0, lambda: status_var.set(message))
+                menu_ref.after(0, lambda: status_var.set(message))
                 return
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
-                root_ref.after(0, lambda: status_var.set(message))
+                menu_ref.after(0, lambda: status_var.set(message))
                 return
             view = build_poll_results_view(results)
 
@@ -1114,7 +1153,7 @@ def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> No
                 status_var.set("最終更新を反映しました（リアルタイム更新なし）。")
                 _render_poll_results(content, view)
 
-            root_ref.after(0, apply)
+            menu_ref.after(0, apply)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1134,7 +1173,6 @@ def _open_poll_results_window(root_ref: tk.Tk, poll_id: int, session: str) -> No
     ).pack(side="left", expand=True, fill="x", padx=(10, 0))
 
     refresh()
-    _center_window_on_monitor(win, root_ref)
     win.after(50, lambda: _safe_set_topmost(win))
 
 
@@ -1151,10 +1189,11 @@ def _display_order_button_text(order: str) -> str:
     return "時系列順に表示" if order == "bookmark" else "リアクション順に表示"
 
 
-def _open_reaction_mode_window(root_ref: tk.Tk) -> None:
-    win = tk.Toplevel(root_ref)
+def _open_reaction_mode_window(root_ref: tk.Tk, menu_ref: tk.Misc) -> None:
+    win = _create_menu_child_window(menu_ref)
     win.title("リアクション方式")
     wrapper = admin_theme.create_window_shell(win, geometry="420x260", topmost=True)
+    _place_child_window_on_menu_monitor(win, menu_ref)
     _create_window_header(
         wrapper,
         title="リアクション方式",
@@ -1215,7 +1254,11 @@ def _open_reaction_mode_window(root_ref: tk.Tk) -> None:
 
     def apply_mode() -> None:
         mode = mode_var.get()
-        if not messagebox.askokcancel("リアクション方式", "リアクション方式を切り替えますか？"):
+        if not messagebox.askokcancel(
+            "リアクション方式",
+            "リアクション方式を切り替えますか？",
+            parent=win,
+        ):
             return
         session = _current_session_name()
         operator = operator_var.get().strip() or "admin"
@@ -1224,10 +1267,10 @@ def _open_reaction_mode_window(root_ref: tk.Tk) -> None:
             try:
                 result = set_reaction_mode(session, mode, operator)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
 
             def apply() -> None:
@@ -1238,7 +1281,7 @@ def _open_reaction_mode_window(root_ref: tk.Tk) -> None:
                 sync_current_label()
                 status_var.set("更新しました。")
 
-            root_ref.after(0, apply)
+            menu_ref.after(0, apply)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1270,10 +1313,11 @@ def _participant_names_from_history() -> list[str]:
     return names
 
 
-def _open_sakura_window(root_ref: tk.Tk) -> None:
-    win = tk.Toplevel(root_ref)
+def _open_sakura_window(root_ref: tk.Tk, menu_ref: tk.Misc) -> None:
+    win = _create_menu_child_window(menu_ref)
     win.title("サクラコメント")
     wrapper = admin_theme.create_window_shell(win, geometry="520x620", topmost=True)
+    _place_child_window_on_menu_monitor(win, menu_ref)
     _create_window_header(
         wrapper,
         title="サクラコメント",
@@ -1321,10 +1365,10 @@ def _open_sakura_window(root_ref: tk.Tk) -> None:
             try:
                 candidates = generate_sakura_names(session, names)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
 
             def apply() -> None:
@@ -1341,7 +1385,7 @@ def _open_sakura_window(root_ref: tk.Tk) -> None:
                     candidate_var.set(candidates[0])
                 status_var.set("候補を生成しました。")
 
-            root_ref.after(0, apply)
+            menu_ref.after(0, apply)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1374,10 +1418,10 @@ def _open_sakura_window(root_ref: tk.Tk) -> None:
         operator_name = operator_var.get().strip() or "admin"
         text = text_widget.get("1.0", "end").strip()
         if not display_name:
-            messagebox.showinfo("サクラコメント", "投稿名義を入力してください。")
+            messagebox.showinfo("サクラコメント", "投稿名義を入力してください。", parent=win)
             return
         if not text:
-            messagebox.showinfo("サクラコメント", "本文を入力してください。")
+            messagebox.showinfo("サクラコメント", "本文を入力してください。", parent=win)
             return
         session = _current_session_name()
         status_var.set("送信中…")
@@ -1386,10 +1430,10 @@ def _open_sakura_window(root_ref: tk.Tk) -> None:
             try:
                 post_sakura_comment(session, display_name, text, operator_name)
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
 
             def apply() -> None:
@@ -1427,10 +1471,11 @@ def _payload_summary(payload: object) -> str:
     return ", ".join(parts)
 
 
-def _open_behavior_events_window(root_ref: tk.Tk) -> None:
-    win = tk.Toplevel(root_ref)
+def _open_behavior_events_window(root_ref: tk.Tk, menu_ref: tk.Misc) -> None:
+    win = _create_menu_child_window(menu_ref)
     win.title("トラッキングログ")
     wrapper = admin_theme.create_window_shell(win, geometry="900x640", topmost=True)
+    _place_child_window_on_menu_monitor(win, menu_ref)
     _create_window_header(
         wrapper,
         title="トラッキングログ",
@@ -1519,10 +1564,10 @@ def _open_behavior_events_window(root_ref: tk.Tk) -> None:
                     actor_real_name=actor_var.get(),
                 )
             except BackendApiError as exc:
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                _show_async_error(root_ref, str(exc))
+                _show_async_error(root_ref, win, str(exc))
                 return
 
             def apply() -> None:
@@ -1537,12 +1582,13 @@ def _open_behavior_events_window(root_ref: tk.Tk) -> None:
     def export_csv() -> None:
         _generation, events = state.snapshot_behavior_events()
         if not events:
-            messagebox.showinfo("トラッキングログ", "出力するログがありません。")
+            messagebox.showinfo("トラッキングログ", "出力するログがありません。", parent=win)
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSVファイル", "*.csv")],
             initialfile=_default_export_filename("_behavior.csv"),
+            parent=win,
         )
         if not path:
             return
@@ -1561,7 +1607,7 @@ def _open_behavior_events_window(root_ref: tk.Tk) -> None:
                         _payload_summary(event.get("payload")),
                     ]
                 )
-        messagebox.showinfo("トラッキングログ", "保存しました。")
+        messagebox.showinfo("トラッキングログ", "保存しました。", parent=win)
 
     actions = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
     actions.pack(fill="x", pady=(10, 0))
@@ -1651,12 +1697,12 @@ def create_menu_window(
         left_text="ディスプレイ切替",
         left_command=switch_display_callback,
         right_text="実験",
-        right_command=lambda: _open_experiment_window(root_ref, refresh_layout_callback),
+        right_command=lambda: _open_experiment_window(menu, refresh_layout_callback),
     )
     admin_theme.create_button(
         buttons,
         text="コメント履歴",
-        command=lambda: _open_history_window(root_ref),
+        command=lambda: _open_history_window(menu),
         variant="secondary",
     ).pack(fill="x", pady=(0, 10))
 
@@ -1676,31 +1722,9 @@ def create_menu_window(
     )
     display_order_button.pack(fill="x", pady=(0, 10))
 
-    admin_theme.create_button(
-        buttons,
-        text="アンケート",
-        command=lambda: _open_poll_window(root_ref),
-        variant="secondary",
-    ).pack(fill="x", pady=(0, 10))
-
-    _create_dashboard_button_row(
-        buttons,
-        left_text="リアクション方式",
-        left_command=lambda: _open_reaction_mode_window(root_ref),
-        right_text="サクラコメント",
-        right_command=lambda: _open_sakura_window(root_ref),
-    )
-
-    admin_theme.create_button(
-        buttons,
-        text="トラッキングログ",
-        command=lambda: _open_behavior_events_window(root_ref),
-        variant="secondary",
-    ).pack(fill="x", pady=(0, 10))
-
     def export_dialog(fmt: str) -> None:
         if not state.message_log:
-            messagebox.showinfo("保存", "データがありません")
+            messagebox.showinfo("保存", "データがありません", parent=menu)
             return
         try:
             import pandas as pd
@@ -1708,6 +1732,7 @@ def create_menu_window(
             messagebox.showerror(
                 "保存エラー",
                 "履歴保存には pandas のインストールが必要です。",
+                parent=menu,
             )
             return
 
@@ -1726,12 +1751,14 @@ def create_menu_window(
                 messagebox.showerror(
                     "保存エラー",
                     "Excel 保存には openpyxl のインストールが必要です。",
+                    parent=menu,
                 )
                 return
             path = filedialog.asksaveasfilename(
                 defaultextension=".xlsx",
                 filetypes=[("Excelファイル", "*.xlsx")],
                 initialfile=_default_export_filename(".xlsx"),
+                parent=menu,
             )
             if not path:
                 return
@@ -1745,11 +1772,12 @@ def create_menu_window(
                 defaultextension=".csv",
                 filetypes=[("CSVファイル", "*.csv")],
                 initialfile=_default_export_filename(".csv"),
+                parent=menu,
             )
             if not path:
                 return
             data_frame.to_csv(path, index=False, encoding="utf-8-sig")
-        messagebox.showinfo("保存", "保存しました")
+        messagebox.showinfo("保存", "保存しました", parent=menu)
 
     _create_dashboard_button_row(
         buttons,
@@ -1760,9 +1788,11 @@ def create_menu_window(
     )
 
     def confirm_exit() -> None:
-        if messagebox.askokcancel("終了", "アプリを終了しますか？"):
+        if messagebox.askokcancel("終了", "アプリを終了しますか？", parent=menu):
             disconnect_session(show_status=False)
             root_ref.destroy()
+
+    menu.protocol("WM_DELETE_WINDOW", confirm_exit)
 
     comment_window_hidden = [False]
 

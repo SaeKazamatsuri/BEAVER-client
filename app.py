@@ -15,7 +15,10 @@ from ui.overlay import (
     stop_overlay,
     update_overlay_geometry,
 )
-from ui.poll_results_overlay import sync_poll_results_overlay
+from ui.poll_results_overlay import (
+    sync_poll_results_overlay,
+    update_poll_results_overlay_geometry,
+)
 from ui.windows import create_menu_window, set_always_on_top
 
 COMMENT_POLL_INTERVAL_MS = 100
@@ -32,6 +35,7 @@ def main() -> None:
     layout_controller = DisplayLayoutController(
         root=root,
         overlay_geometry_updater=update_overlay_geometry,
+        poll_results_geometry_updater=update_poll_results_overlay_geometry,
         stamp_area_mode_getter=lambda: "comment",
     )
     layout_controller.apply_layout()

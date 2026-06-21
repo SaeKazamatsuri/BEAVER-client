@@ -35,6 +35,7 @@ class DisplayLayoutSnapshot:
     monitor: MonitorRect
     comment_rect: WindowRect
     overlay_rect: WindowRect
+    poll_results_rect: WindowRect
     stamp_area_mode: str
 
 
@@ -94,10 +95,17 @@ def build_layout(
         y=monitor.y,
     )
     overlay_rect = comment_rect
+    poll_results_rect = WindowRect(
+        width=max(1, monitor.width - comment_width),
+        height=max(1, monitor.height),
+        x=monitor.x,
+        y=monitor.y,
+    )
     return DisplayLayoutSnapshot(
         monitor=monitor,
         comment_rect=comment_rect,
         overlay_rect=overlay_rect,
+        poll_results_rect=poll_results_rect,
         stamp_area_mode="comment",
     )
 
@@ -109,10 +117,12 @@ class DisplayLayoutController:
         root: CommentWindow,
         overlay_geometry_updater: Callable[[WindowRect], None],
         stamp_area_mode_getter: Callable[[], str],
+        poll_results_geometry_updater: Callable[[WindowRect], None] | None = None,
         monitor_provider: Callable[[], Sequence[object]] = get_monitors,
     ) -> None:
         self._root = root
         self._overlay_geometry_updater = overlay_geometry_updater
+        self._poll_results_geometry_updater = poll_results_geometry_updater
         self._stamp_area_mode_getter = stamp_area_mode_getter
         self._monitor_provider = monitor_provider
         self.active_monitor_index = 0
@@ -150,6 +160,8 @@ class DisplayLayoutController:
         )
         self._root.geometry(snapshot.comment_rect.to_geometry())
         self._overlay_geometry_updater(snapshot.overlay_rect)
+        if self._poll_results_geometry_updater is not None:
+            self._poll_results_geometry_updater(snapshot.poll_results_rect)
         self._current_snapshot = snapshot
         return snapshot
 
