@@ -15,6 +15,7 @@ from ui.overlay import (
     stop_overlay,
     update_overlay_geometry,
 )
+from ui.poll_results_overlay import sync_poll_results_overlay
 from ui.windows import create_menu_window, set_always_on_top
 
 COMMENT_POLL_INTERVAL_MS = 100
@@ -49,6 +50,7 @@ def main() -> None:
     if existing_comments:
         comment_list.set_comments(existing_comments)
     rendered_generation_state = [rendered_generation]
+    rendered_poll_results_generation_state = [-1]
 
     def update_comments() -> None:
         generation, comments = state.snapshot_messages()
@@ -75,6 +77,11 @@ def main() -> None:
         except queue.Empty:
             pass
 
+        poll_generation, poll_results = state.snapshot_visible_poll_results()
+        if poll_generation != rendered_poll_results_generation_state[0]:
+            sync_poll_results_overlay(root, poll_results)
+            rendered_poll_results_generation_state[0] = poll_generation
+
         root.after(COMMENT_POLL_INTERVAL_MS, update_comments)
 
     def switch_display() -> None:
@@ -94,6 +101,7 @@ def main() -> None:
     def on_close() -> None:
         disconnect_session(show_status=False)
         stop_overlay()
+        sync_poll_results_overlay(root, None)
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)

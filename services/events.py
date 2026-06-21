@@ -26,7 +26,11 @@ from services.backend_api import (
     BackendApiError,
     build_ws_url,
     fetch_bootstrap,
+    fetch_reaction_mode,
     parse_comment_event,
+    parse_behavior_event,
+    parse_poll_results_event,
+    parse_reaction_mode_event,
     parse_reaction_update_event,
 )
 
@@ -72,6 +76,39 @@ def _on_reaction_update(update: dict) -> None:
     if not isinstance(comment_id, int) or not isinstance(bookmark_count, int):
         return
     state.apply_reaction_update(comment_id, bookmark_count)
+
+
+def _on_reaction_mode_update(update: dict) -> None:
+    mode = update.get("mode")
+    reaction_types = update.get("reaction_types")
+    if not isinstance(mode, str) or not isinstance(reaction_types, list):
+        return
+    state.set_reaction_mode(mode, reaction_types)
+
+
+def _on_behavior_event(update: dict) -> None:
+    event = update.get("event")
+    if isinstance(event, dict):
+        state.append_behavior_event(event)
+
+
+def _poll_results_event_targets_client(event: dict) -> bool:
+    target = event.get("target")
+    return target in {"client", "both", "none"}
+
+
+def _on_poll_results_event(event: dict) -> None:
+    if event.get("type") == "poll.results.displayed":
+        if not _poll_results_event_targets_client(event):
+            state.set_visible_poll_results(None)
+            return
+        results = event.get("results")
+        if isinstance(results, dict):
+            state.set_visible_poll_results(results)
+        return
+    if not _poll_results_event_targets_client(event):
+        return
+    state.set_visible_poll_results(None)
 
 
 def _next_connection_serial() -> int:
@@ -235,6 +272,24 @@ def _run_websocket(session: str, serial: int, stop_event: threading.Event) -> No
                                 if reaction.get("session") != session:
                                     continue
                                 _on_reaction_update(reaction)
+                                continue
+                            reaction_mode = parse_reaction_mode_event(message)
+                            if reaction_mode is not None:
+                                if reaction_mode.get("session") != session:
+                                    continue
+                                _on_reaction_mode_update(reaction_mode)
+                                continue
+                            poll_results = parse_poll_results_event(message)
+                            if poll_results is not None:
+                                if poll_results.get("session") != session:
+                                    continue
+                                _on_poll_results_event(poll_results)
+                                continue
+                            behavior_event = parse_behavior_event(message)
+                            if behavior_event is not None:
+                                if behavior_event.get("session") != session:
+                                    continue
+                                _on_behavior_event(behavior_event)
                     elif isinstance(event, Ping):
                         try:
                             sock.sendall(connection.send(event.response()))
@@ -293,6 +348,11 @@ def connect_session(session_name: str):
 
             state.CURRENT_SESSION = normalized_session
             state.session_ready = True
+            try:
+                reaction_mode = fetch_reaction_mode(normalized_session)
+                _on_reaction_mode_update(reaction_mode)
+            except Exception:
+                pass
             _on_history(messages)
             state.safe_set(
                 state.menu_current_session_var,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import csv
 import threading
 from collections.abc import Callable, Sequence
 from typing import Protocol
@@ -11,8 +12,13 @@ from tkinter import filedialog, messagebox
 from services.backend_api import (
     BackendApiError,
     create_poll,
+    fetch_behavior_events,
     fetch_poll_results,
     fetch_polls,
+    generate_sakura_names,
+    post_sakura_comment,
+    set_reaction_mode,
+    set_poll_results_display,
     start_poll,
 )
 from services.events import connect_session, disconnect_session
@@ -601,6 +607,7 @@ def _render_poll_list(
     session: str,
     on_start: Callable[[int], None],
     on_results: Callable[[int], None],
+    on_display: Callable[[int, str], None],
 ) -> None:
     for child in parent.winfo_children():
         child.destroy()
@@ -680,6 +687,21 @@ def _render_poll_list(
             command=lambda pid=poll_id: on_results(pid),
             variant="secondary",
         ).pack(side="left", expand=True, fill="x", padx=(10, 0))
+
+        display_actions = tk.Frame(card, bg=admin_theme.SURFACE_BG)
+        display_actions.pack(fill="x", pady=(8, 0))
+        for label, target in (
+            ("フロント表示", "frontend"),
+            ("クライアント表示", "client"),
+            ("両方表示", "both"),
+            ("非表示", "none"),
+        ):
+            admin_theme.create_button(
+                display_actions,
+                text=label,
+                command=lambda pid=poll_id, t=target: on_display(pid, t),
+                variant="secondary",
+            ).pack(side="left", expand=True, fill="x", padx=(0, 6))
 
 
 def _open_poll_window(root_ref: tk.Tk) -> None:
@@ -785,6 +807,23 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
     def open_results(poll_id: int) -> None:
         _open_poll_results_window(root_ref, poll_id, _current_session_name())
 
+    def display_results(poll_id: int, target: str) -> None:
+        session = _current_session_name()
+
+        def worker() -> None:
+            try:
+                set_poll_results_display(session, poll_id, target)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+            message = "非表示にしました。" if target == "none" else "結果表示を更新しました。"
+            root_ref.after(0, lambda: messagebox.showinfo("アンケート", message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def refresh_list() -> None:
         session = _current_session_name()
 
@@ -808,6 +847,7 @@ def _open_poll_window(root_ref: tk.Tk) -> None:
                     session=session,
                     on_start=start_poll_action,
                     on_results=open_results,
+                    on_display=display_results,
                 )
 
             root_ref.after(0, apply)
@@ -1111,6 +1151,447 @@ def _display_order_button_text(order: str) -> str:
     return "時系列順に表示" if order == "bookmark" else "リアクション順に表示"
 
 
+def _open_reaction_mode_window(root_ref: tk.Tk) -> None:
+    win = tk.Toplevel(root_ref)
+    win.title("リアクション方式")
+    wrapper = admin_theme.create_window_shell(win, geometry="420x260", topmost=True)
+    _create_window_header(
+        wrapper,
+        title="リアクション方式",
+        description="現在のセッションに対して、参加者画面のリアクションボタン構成を切り替えます。",
+        wraplength=360,
+    )
+    status_var = tk.StringVar(value="")
+    mode_var = tk.StringVar(value=state.reaction_mode)
+
+    current_label = tk.Label(
+        wrapper,
+        text="",
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.BODY_FONT,
+        anchor="w",
+        justify="left",
+        wraplength=360,
+    )
+    current_label.pack(fill="x", pady=(8, 0))
+
+    def sync_current_label() -> None:
+        _generation, mode, reaction_types = state.snapshot_reaction_mode()
+        labels = " / ".join(
+            f"{item.get('emoji', '')}{item.get('label', '')}" for item in reaction_types
+        )
+        mode_label = "1ボタン方式" if mode == "single_thumb" else "5ボタン方式"
+        current_label.configure(text=f"現在: {mode_label}\n{labels}")
+
+    sync_current_label()
+
+    body = admin_theme.create_card(wrapper)
+    body.pack(fill="x", pady=(10, 0))
+    for label, value in (("1ボタン方式", "single_thumb"), ("5ボタン方式", "five_buttons")):
+        tk.Radiobutton(
+            body,
+            text=label,
+            variable=mode_var,
+            value=value,
+            bg=admin_theme.SURFACE_BG,
+            fg=admin_theme.TEXT_COLOR,
+            selectcolor=admin_theme.SURFACE_BG,
+            activebackground=admin_theme.SURFACE_BG,
+            font=admin_theme.BODY_FONT,
+            anchor="w",
+        ).pack(fill="x", pady=2)
+
+    operator_var = tk.StringVar(value="admin")
+    tk.Label(
+        body,
+        text="実操作者名",
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(8, 0))
+    admin_theme.create_entry(body, textvariable=operator_var).pack(fill="x")
+
+    def apply_mode() -> None:
+        mode = mode_var.get()
+        if not messagebox.askokcancel("リアクション方式", "リアクション方式を切り替えますか？"):
+            return
+        session = _current_session_name()
+        operator = operator_var.get().strip() or "admin"
+
+        def worker() -> None:
+            try:
+                result = set_reaction_mode(session, mode, operator)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+
+            def apply() -> None:
+                reaction_types = result.get("reaction_types")
+                result_mode = result.get("mode")
+                if isinstance(result_mode, str) and isinstance(reaction_types, list):
+                    state.set_reaction_mode(result_mode, reaction_types)
+                sync_current_label()
+                status_var.set("更新しました。")
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    admin_theme.create_button(
+        wrapper,
+        text="切り替え",
+        command=apply_mode,
+        variant="primary",
+    ).pack(fill="x", pady=(10, 0))
+    tk.Label(
+        wrapper,
+        textvariable=status_var,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(6, 0))
+
+
+def _participant_names_from_history() -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for message in state.message_log:
+        name = _string_value(message.get("name")).strip()
+        if not name or name in seen or message.get("source") == "sakura":
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _open_sakura_window(root_ref: tk.Tk) -> None:
+    win = tk.Toplevel(root_ref)
+    win.title("サクラコメント")
+    wrapper = admin_theme.create_window_shell(win, geometry="520x620", topmost=True)
+    _create_window_header(
+        wrapper,
+        title="サクラコメント",
+        description="選択した名義で通常コメントとして投稿します。研究ログにはサクラ投稿として記録されます。",
+        wraplength=460,
+    )
+
+    candidate_var = tk.StringVar(value="")
+    operator_var = tk.StringVar(value="admin")
+    text_widget: tk.Text
+    status_var = tk.StringVar(value="")
+
+    names_card = _create_titled_card(wrapper, title="参加者ニックネーム")
+    participant_list = tk.Listbox(
+        names_card,
+        height=5,
+        bg="#ffffff",
+        fg=admin_theme.TEXT_COLOR,
+        activestyle="none",
+    )
+    participant_list.pack(fill="x", pady=(6, 0))
+
+    def refresh_participants() -> None:
+        participant_list.delete(0, tk.END)
+        for name in _participant_names_from_history():
+            participant_list.insert(tk.END, name)
+
+    refresh_participants()
+
+    candidate_card = _create_titled_card(wrapper, title="投稿名義")
+    admin_theme.create_entry(candidate_card, textvariable=candidate_var).pack(fill="x", pady=(4, 6))
+
+    candidate_buttons = tk.Frame(candidate_card, bg=admin_theme.SURFACE_BG)
+    candidate_buttons.pack(fill="x")
+
+    def choose_candidate(name: str) -> None:
+        candidate_var.set(name)
+
+    def generate_candidates() -> None:
+        session = _current_session_name()
+        names = _participant_names_from_history()
+        status_var.set("候補生成中…")
+
+        def worker() -> None:
+            try:
+                candidates = generate_sakura_names(session, names)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+
+            def apply() -> None:
+                for child in candidate_buttons.winfo_children():
+                    child.destroy()
+                for candidate in candidates:
+                    admin_theme.create_button(
+                        candidate_buttons,
+                        text=candidate,
+                        command=lambda value=candidate: choose_candidate(value),
+                        variant="secondary",
+                    ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+                if candidates:
+                    candidate_var.set(candidates[0])
+                status_var.set("候補を生成しました。")
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    admin_theme.create_button(
+        candidate_card,
+        text="GPTで候補を生成",
+        command=generate_candidates,
+        variant="secondary",
+    ).pack(fill="x", pady=(8, 0))
+
+    operator_card = _create_titled_card(wrapper, title="実操作者")
+    admin_theme.create_entry(operator_card, textvariable=operator_var).pack(fill="x", pady=(4, 0))
+
+    text_card = _create_titled_card(wrapper, title="本文")
+    text_widget = tk.Text(
+        text_card,
+        height=7,
+        wrap="word",
+        bg="#ffffff",
+        fg=admin_theme.TEXT_COLOR,
+        insertbackground=admin_theme.TEXT_COLOR,
+        font=admin_theme.BODY_FONT,
+        relief="solid",
+        borderwidth=1,
+    )
+    text_widget.pack(fill="both", expand=True, pady=(4, 0))
+
+    def submit() -> None:
+        display_name = candidate_var.get().strip()
+        operator_name = operator_var.get().strip() or "admin"
+        text = text_widget.get("1.0", "end").strip()
+        if not display_name:
+            messagebox.showinfo("サクラコメント", "投稿名義を入力してください。")
+            return
+        if not text:
+            messagebox.showinfo("サクラコメント", "本文を入力してください。")
+            return
+        session = _current_session_name()
+        status_var.set("送信中…")
+
+        def worker() -> None:
+            try:
+                post_sakura_comment(session, display_name, text, operator_name)
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+
+            def apply() -> None:
+                text_widget.delete("1.0", "end")
+                status_var.set("送信しました。")
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    admin_theme.create_button(
+        wrapper,
+        text="サクラコメントを送信",
+        command=submit,
+        variant="primary",
+    ).pack(fill="x", pady=(10, 0))
+    tk.Label(
+        wrapper,
+        textvariable=status_var,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(fill="x", pady=(6, 0))
+
+
+def _payload_summary(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    parts: list[str] = []
+    for key, value in payload.items():
+        if len(parts) >= 4:
+            break
+        parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
+def _open_behavior_events_window(root_ref: tk.Tk) -> None:
+    win = tk.Toplevel(root_ref)
+    win.title("トラッキングログ")
+    wrapper = admin_theme.create_window_shell(win, geometry="900x640", topmost=True)
+    _create_window_header(
+        wrapper,
+        title="トラッキングログ",
+        description="最新の行動ログを確認します。WebSocketで届いたイベントは自動で反映されます。",
+        wraplength=820,
+    )
+
+    controls = admin_theme.create_card(wrapper)
+    controls.pack(fill="x", pady=(8, 0))
+    event_type_var = tk.StringVar(value="")
+    actor_var = tk.StringVar(value="")
+    auto_refresh_var = tk.BooleanVar(value=True)
+    status_var = tk.StringVar(value="")
+
+    row = tk.Frame(controls, bg=admin_theme.SURFACE_BG)
+    row.pack(fill="x")
+    tk.Label(row, text="イベント種別", bg=admin_theme.SURFACE_BG, fg=admin_theme.TEXT_COLOR).pack(side="left")
+    admin_theme.create_entry(row, textvariable=event_type_var).pack(side="left", fill="x", expand=True, padx=(8, 12))
+    tk.Label(row, text="本名", bg=admin_theme.SURFACE_BG, fg=admin_theme.TEXT_COLOR).pack(side="left")
+    admin_theme.create_entry(row, textvariable=actor_var).pack(side="left", fill="x", expand=True, padx=(8, 12))
+    tk.Checkbutton(
+        row,
+        text="自動更新",
+        variable=auto_refresh_var,
+        bg=admin_theme.SURFACE_BG,
+        fg=admin_theme.TEXT_COLOR,
+        selectcolor=admin_theme.SURFACE_BG,
+        activebackground=admin_theme.SURFACE_BG,
+    ).pack(side="left")
+
+    table_frame = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    table_frame.pack(expand=True, fill="both", pady=(10, 0))
+    table_frame.grid_columnconfigure(0, weight=0)
+    table_frame.grid_columnconfigure(1, weight=0)
+    table_frame.grid_columnconfigure(2, weight=0)
+    table_frame.grid_columnconfigure(3, weight=0)
+    table_frame.grid_columnconfigure(4, weight=0)
+    table_frame.grid_columnconfigure(5, weight=0)
+    table_frame.grid_columnconfigure(6, weight=1)
+
+    def render(events: Sequence[dict[str, object]]) -> None:
+        for child in table_frame.winfo_children():
+            child.destroy()
+        headers = ("発生時刻", "表示名", "本名", "イベント", "対象", "ID", "payload")
+        for col, header in enumerate(headers):
+            tk.Label(
+                table_frame,
+                text=header,
+                bg=admin_theme.WINDOW_BG,
+                fg=admin_theme.TITLE_COLOR,
+                font=admin_theme.SMALL_BOLD_FONT,
+                anchor="w",
+            ).grid(row=0, column=col, sticky="ew", padx=4, pady=(0, 4))
+        for row_index, event in enumerate(events[:100], start=1):
+            values = (
+                _string_value(event.get("occurred_at")),
+                _string_value(event.get("actor_name")),
+                _string_value(event.get("actor_real_name")),
+                _string_value(event.get("event_type")),
+                _string_value(event.get("target_type")),
+                _string_value(event.get("target_id")),
+                _payload_summary(event.get("payload")),
+            )
+            for col, value in enumerate(values):
+                tk.Label(
+                    table_frame,
+                    text=value,
+                    bg=admin_theme.WINDOW_BG,
+                    fg=admin_theme.TEXT_COLOR,
+                    font=admin_theme.SMALL_FONT,
+                    anchor="w",
+                    justify="left",
+                    wraplength=260 if col == 6 else 140,
+                ).grid(row=row_index, column=col, sticky="nw", padx=4, pady=2)
+
+    def refresh() -> None:
+        session = _current_session_name()
+        status_var.set("読み込み中…")
+
+        def worker() -> None:
+            try:
+                events = fetch_behavior_events(
+                    session,
+                    limit=100,
+                    event_type=event_type_var.get(),
+                    actor_real_name=actor_var.get(),
+                )
+            except BackendApiError as exc:
+                _show_async_error(root_ref, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                _show_async_error(root_ref, str(exc))
+                return
+
+            def apply() -> None:
+                state.set_behavior_events(events)
+                render(events)
+                status_var.set(f"{len(events)}件を表示中")
+
+            root_ref.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def export_csv() -> None:
+        _generation, events = state.snapshot_behavior_events()
+        if not events:
+            messagebox.showinfo("トラッキングログ", "出力するログがありません。")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSVファイル", "*.csv")],
+            initialfile=_default_export_filename("_behavior.csv"),
+        )
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as file_obj:
+            writer = csv.writer(file_obj)
+            writer.writerow(["発生時刻", "表示名", "本名", "イベント", "対象", "ID", "payload"])
+            for event in events:
+                writer.writerow(
+                    [
+                        _string_value(event.get("occurred_at")),
+                        _string_value(event.get("actor_name")),
+                        _string_value(event.get("actor_real_name")),
+                        _string_value(event.get("event_type")),
+                        _string_value(event.get("target_type")),
+                        _string_value(event.get("target_id")),
+                        _payload_summary(event.get("payload")),
+                    ]
+                )
+        messagebox.showinfo("トラッキングログ", "保存しました。")
+
+    actions = tk.Frame(wrapper, bg=admin_theme.WINDOW_BG)
+    actions.pack(fill="x", pady=(10, 0))
+    admin_theme.create_button(actions, text="更新", command=refresh, variant="primary").pack(side="left")
+    admin_theme.create_button(actions, text="CSV出力", command=export_csv, variant="secondary").pack(side="left", padx=(8, 0))
+    tk.Label(
+        actions,
+        textvariable=status_var,
+        bg=admin_theme.WINDOW_BG,
+        fg=admin_theme.SUBTLE_TEXT_COLOR,
+        font=admin_theme.SMALL_FONT,
+        anchor="w",
+    ).pack(side="left", padx=(12, 0))
+
+    last_generation = [-1]
+
+    def poll_local_events() -> None:
+        if not win.winfo_exists():
+            return
+        generation, events = state.snapshot_behavior_events()
+        if auto_refresh_var.get() and generation != last_generation[0]:
+            render(events)
+            status_var.set(f"{len(events)}件を表示中")
+            last_generation[0] = generation
+        win.after(500, poll_local_events)
+
+    refresh()
+    poll_local_events()
+
+
 def create_menu_window(
     switch_display_callback: Callable[[], None],
     refresh_layout_callback: Callable[[], None],
@@ -1122,7 +1603,7 @@ def create_menu_window(
 
     wrapper = admin_theme.create_window_shell(
         menu,
-        geometry="430x430",
+        geometry="430x620",
         topmost=True,
     )
 
@@ -1199,6 +1680,21 @@ def create_menu_window(
         buttons,
         text="アンケート",
         command=lambda: _open_poll_window(root_ref),
+        variant="secondary",
+    ).pack(fill="x", pady=(0, 10))
+
+    _create_dashboard_button_row(
+        buttons,
+        left_text="リアクション方式",
+        left_command=lambda: _open_reaction_mode_window(root_ref),
+        right_text="サクラコメント",
+        right_command=lambda: _open_sakura_window(root_ref),
+    )
+
+    admin_theme.create_button(
+        buttons,
+        text="トラッキングログ",
+        command=lambda: _open_behavior_events_window(root_ref),
         variant="secondary",
     ).pack(fill="x", pady=(0, 10))
 

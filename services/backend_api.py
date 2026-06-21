@@ -69,28 +69,23 @@ def parse_comment_event(raw_message: str) -> dict[str, object] | None:
         return None
 
 
-# しおり=bookmark の単一リアクション。注目度はこの件数で測る。
-BOOKMARK_REACTION_KEY = "bookmark"
-
-
-def _bookmark_count_from_reactions(value: object) -> int:
+def _reaction_total_from_reactions(value: object) -> int:
     if not isinstance(value, list):
         return 0
+    total = 0
     for reaction in value:
         if not isinstance(reaction, Mapping):
-            continue
-        if reaction.get("reactionKey") != BOOKMARK_REACTION_KEY:
             continue
         count = reaction.get("count")
         if isinstance(count, bool):
             continue
         if isinstance(count, int):
-            return count
-    return 0
+            total += max(0, count)
+    return total
 
 
 def parse_reaction_update_event(raw_message: str) -> dict[str, object] | None:
-    """comment.reactions.updated を解釈し、しおり件数のライブ更新に使う。"""
+    """comment.reactions.updated を解釈し、注目度のライブ更新に使う。"""
     try:
         payload = json.loads(raw_message)
     except json.JSONDecodeError:
@@ -112,8 +107,83 @@ def parse_reaction_update_event(raw_message: str) -> dict[str, object] | None:
     return {
         "session": session,
         "comment_id": comment_id,
-        "bookmark_count": _bookmark_count_from_reactions(body.get("reactions")),
+        "bookmark_count": _reaction_total_from_reactions(body.get("reactions")),
     }
+
+
+def parse_reaction_mode_event(raw_message: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(raw_message)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("type") != "reaction.mode.updated":
+        return None
+    body = payload.get("payload")
+    if not isinstance(body, Mapping):
+        return None
+    try:
+        return normalize_reaction_mode(body)
+    except BackendApiError:
+        return None
+
+
+def parse_behavior_event(raw_message: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(raw_message)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("type") != "behavior.event.created":
+        return None
+    body = payload.get("payload")
+    if not isinstance(body, Mapping):
+        return None
+    session = body.get("session")
+    event = body.get("event")
+    if not isinstance(session, str):
+        return None
+    try:
+        normalized_event = normalize_behavior_event(event)
+    except BackendApiError:
+        return None
+    return {"session": session, "event": normalized_event}
+
+
+def parse_poll_results_event(raw_message: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(raw_message)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+    event_type = payload.get("type")
+    body = payload.get("payload")
+    if not isinstance(event_type, str) or not isinstance(body, Mapping):
+        return None
+    try:
+        if event_type == "poll.results.displayed":
+            target = _require_string(body.get("target"), "target")
+            return {
+                "type": event_type,
+                "session": _require_string(body.get("session"), "session"),
+                "target": target,
+                "results": normalize_poll_results(body.get("results")),
+            }
+        if event_type == "poll.results.hidden":
+            return {
+                "type": event_type,
+                "session": _require_string(body.get("session"), "session"),
+                "target": _require_string(body.get("target"), "target"),
+            }
+    except BackendApiError:
+        return None
+    return None
 
 
 def normalize_comment_item(value: object) -> dict[str, object]:
@@ -135,7 +205,167 @@ def normalize_comment_item(value: object) -> dict[str, object]:
         "source": source,
         "created_at": created_at,
         "server_time_iso": created_at,
-        "bookmark_count": _bookmark_count_from_reactions(payload.get("reactions")),
+        "bookmark_count": _reaction_total_from_reactions(payload.get("reactions")),
+    }
+
+
+def fetch_reaction_mode(session: str) -> dict[str, object]:
+    params: dict[str, str] = {}
+    if session.strip():
+        params["session"] = session
+    response = requests.get(
+        build_api_url("/api/reaction-mode"),
+        params=params,
+        timeout=BACKEND_HTTP_TIMEOUT_SEC,
+    )
+    payload = _require_mapping(_parse_json_payload(response), "reaction mode")
+    if response.status_code != requests.codes.ok:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_reaction_mode(payload)
+
+
+def set_reaction_mode(session: str, mode: str, operator_name: str) -> dict[str, object]:
+    url = build_api_url("/api/client/reaction-mode")
+    try:
+        response = requests.post(
+            url,
+            json={
+                "session": session,
+                "mode": mode,
+                "operatorName": operator_name,
+            },
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    payload = _require_mapping(_parse_json_payload(response), "reaction mode")
+    if response.status_code != requests.codes.ok:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_reaction_mode(payload)
+
+
+def generate_sakura_names(
+    session: str, participant_names: Sequence[str]
+) -> list[str]:
+    url = build_api_url("/api/client/sakura-names/generate")
+    try:
+        response = requests.post(
+            url,
+            json={"session": session, "participantNames": list(participant_names)},
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    payload = _require_mapping(_parse_json_payload(response), "sakura names")
+    if response.status_code != requests.codes.ok:
+        error_message = payload.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return _require_string_list(payload.get("candidates"), "candidates")
+
+
+def post_sakura_comment(
+    session: str, display_name: str, text: str, operator_name: str
+) -> dict[str, object]:
+    url = build_api_url("/api/client/sakura-comments")
+    try:
+        response = requests.post(
+            url,
+            json={
+                "session": session,
+                "displayName": display_name,
+                "text": text,
+                "operatorName": operator_name,
+            },
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    payload = _parse_json_payload(response)
+    if response.status_code != requests.codes.created:
+        if isinstance(payload, Mapping):
+            error_message = payload.get("error")
+            if isinstance(error_message, str) and error_message:
+                raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return normalize_comment_item(payload)
+
+
+def fetch_behavior_events(
+    session: str,
+    *,
+    limit: int = 100,
+    event_type: str = "",
+    actor_real_name: str = "",
+) -> list[dict[str, object]]:
+    params: dict[str, str] = {"session": session, "limit": str(limit)}
+    if event_type.strip():
+        params["eventType"] = event_type.strip()
+    if actor_real_name.strip():
+        params["actorRealName"] = actor_real_name.strip()
+    response = requests.get(
+        build_api_url("/api/client/behavior-events"),
+        params=params,
+        timeout=BACKEND_HTTP_TIMEOUT_SEC,
+    )
+    payload = _parse_json_payload(response)
+    if response.status_code != requests.codes.ok:
+        if isinstance(payload, Mapping):
+            error_message = payload.get("error")
+            if isinstance(error_message, str) and error_message:
+                raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    raw_events = _require_list(payload, "behavior events")
+    return [normalize_behavior_event(item) for item in raw_events]
+
+
+def normalize_reaction_mode(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "reaction mode")
+    raw_types = _require_list(payload.get("reactionTypes"), "reactionTypes")
+    return {
+        "session": _require_string(payload.get("session"), "session"),
+        "mode": _require_string(payload.get("mode"), "mode"),
+        "reaction_types": [normalize_reaction_type(item) for item in raw_types],
+    }
+
+
+def normalize_reaction_type(value: object) -> dict[str, str]:
+    payload = _require_mapping(value, "reaction type")
+    return {
+        "key": _require_string(payload.get("key"), "key"),
+        "label": _require_string(payload.get("label"), "label"),
+        "emoji": _require_string(payload.get("emoji"), "emoji"),
+    }
+
+
+def normalize_behavior_event(value: object) -> dict[str, object]:
+    payload = _require_mapping(value, "behavior event")
+    payload_json = payload.get("payload")
+    if not isinstance(payload_json, Mapping):
+        payload_json = {}
+    return {
+        "id": _require_int(payload.get("id"), "id"),
+        "session": _require_string(payload.get("session"), "session"),
+        "actor_type": _require_string(payload.get("actorType"), "actorType"),
+        "actor_name": _require_string(payload.get("actorName"), "actorName"),
+        "actor_real_name": _require_string(
+            payload.get("actorRealName"), "actorRealName"
+        ),
+        "event_type": _require_string(payload.get("eventType"), "eventType"),
+        "target_type": _require_nullable_string(
+            payload.get("targetType"), "targetType"
+        ),
+        "target_id": _require_nullable_int(payload.get("targetId"), "targetId"),
+        "occurred_at": _require_string(payload.get("occurredAt"), "occurredAt"),
+        "received_at": _require_string(payload.get("receivedAt"), "receivedAt"),
+        "payload": dict(payload_json),
     }
 
 
@@ -228,6 +458,34 @@ def fetch_poll_results(
             raise BackendApiError(error_message)
         raise BackendApiError(f"{response.status_code} {response.reason}")
     return normalize_poll_results(payload)
+
+
+def set_poll_results_display(
+    session: str, poll_id: int, target: str, run_id: int | None = None
+) -> dict[str, object]:
+    url = build_api_url("/api/client/poll-results/display")
+    payload: dict[str, object] = {
+        "session": session,
+        "pollId": poll_id,
+        "target": target,
+    }
+    if run_id is not None:
+        payload["runId"] = run_id
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=BACKEND_HTTP_TIMEOUT_SEC,
+        )
+    except requests.RequestException as exc:
+        raise BackendApiError(f"POST {url} failed: {exc}") from exc
+    result = _require_mapping(_parse_json_payload(response), "poll display response")
+    if response.status_code != requests.codes.ok:
+        error_message = result.get("error")
+        if isinstance(error_message, str) and error_message:
+            raise BackendApiError(error_message)
+        raise BackendApiError(f"{response.status_code} {response.reason}")
+    return dict(result)
 
 
 def normalize_poll_item(value: object) -> dict[str, object]:

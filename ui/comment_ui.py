@@ -19,6 +19,9 @@ NAME_TAG_BG = "#ffef8a"
 NAME_TAG_FG = "#0b1f33"
 TIME_TEXT_FG = "#6b7a90"
 BODY_TEXT_FG = "#0b1f33"
+REACTION_HIGHLIGHT_SOFT = "#fff8c9"
+REACTION_HIGHLIGHT_MEDIUM = "#ffef8a"
+REACTION_HIGHLIGHT_STRONG = "#ffd84f"
 
 NAME_FONT = ("Yu Gothic UI", -16, "bold")
 TIME_FONT = ("Yu Gothic UI", -16)
@@ -267,6 +270,16 @@ def _card_total_height(
     return (card_bottom - card_top) + shadow_offset_y + bottom_padding
 
 
+def _reaction_highlight_bg(count: int) -> str:
+    if count >= 15:
+        return REACTION_HIGHLIGHT_STRONG
+    if count >= 5:
+        return REACTION_HIGHLIGHT_MEDIUM
+    if count >= 1:
+        return REACTION_HIGHLIGHT_SOFT
+    return CARD_BG
+
+
 def _draw_comment_card(
     canvas: tk.Canvas,
     entry: CommentEntry,
@@ -436,6 +449,7 @@ class CommentCardCanvas(tk.Canvas):
             card_top=card_top,
             card_right=card_right,
             tags=(),
+            bg_color=_reaction_highlight_bg(self._entry.bookmark_count),
         )
         if height != self._last_height:
             self._last_height = height
@@ -622,6 +636,7 @@ class CommentListView(tk.Frame):
                 card_top=current_y,
                 card_right=card_right,
                 tags=("comment_card",),
+                bg_color=_reaction_highlight_bg(entry.bookmark_count),
             )
             current_y += height + 5
 

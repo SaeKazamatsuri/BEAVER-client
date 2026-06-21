@@ -16,10 +16,14 @@ from config.constants import (
 from ui.comment_ui import CommentEntry
 
 message_queue: queue.Queue[dict[str, object]] = queue.Queue()
+behavior_event_queue: queue.Queue[dict[str, object]] = queue.Queue()
 message_log: list[dict[str, object]] = []
+behavior_event_log: list[dict[str, object]] = []
 messages: list[CommentEntry] = []
 _message_lock = threading.Lock()
 _message_generation = 0
+_behavior_event_lock = threading.Lock()
+_behavior_event_generation = 0
 
 overlay_window: tk.Toplevel | None = None
 overlay_canvas: tk.Canvas | None = None
@@ -40,6 +44,16 @@ menu_current_session_var: tk.StringVar | None = None
 experiment_window: tk.Toplevel | None = None
 poll_window: tk.Toplevel | None = None
 poll_results_window: tk.Toplevel | None = None
+poll_results_overlay_window: tk.Toplevel | None = None
+visible_poll_results: dict[str, object] | None = None
+_poll_results_lock = threading.Lock()
+_poll_results_generation = 0
+reaction_mode: str = "single_thumb"
+reaction_types: list[dict[str, str]] = [
+    {"key": "like", "label": "いいね", "emoji": "👍"},
+]
+_reaction_mode_lock = threading.Lock()
+_reaction_mode_generation = 0
 
 # --- Experiment (stamp) settings ---
 # These values are intentionally mutable so experiments can tweak them at runtime.
@@ -89,7 +103,7 @@ def snapshot_messages() -> tuple[int, list[CommentEntry]]:
 
 
 def apply_reaction_update(comment_id: int, bookmark_count: int) -> None:
-    """しおり件数のライブ更新。変化があれば世代を進めて再描画させる。"""
+    """注目度のライブ更新。変化があれば世代を進めて再描画させる。"""
     global _message_generation
     with _message_lock:
         changed = False
@@ -109,6 +123,66 @@ def apply_reaction_update(comment_id: int, bookmark_count: int) -> None:
                 break
         if changed:
             _message_generation += 1
+
+
+def set_reaction_mode(mode: str, reaction_type_items: list[dict[str, object]]) -> None:
+    global reaction_mode
+    global reaction_types
+    global _reaction_mode_generation
+    normalized_types: list[dict[str, str]] = []
+    for item in reaction_type_items:
+        key = item.get("key")
+        label = item.get("label")
+        emoji = item.get("emoji")
+        if isinstance(key, str) and isinstance(label, str) and isinstance(emoji, str):
+            normalized_types.append({"key": key, "label": label, "emoji": emoji})
+    if not normalized_types:
+        normalized_types = [{"key": "like", "label": "いいね", "emoji": "👍"}]
+    with _reaction_mode_lock:
+        reaction_mode = mode
+        reaction_types = normalized_types
+        _reaction_mode_generation += 1
+
+
+def snapshot_reaction_mode() -> tuple[int, str, list[dict[str, str]]]:
+    with _reaction_mode_lock:
+        return _reaction_mode_generation, reaction_mode, [dict(item) for item in reaction_types]
+
+
+def set_behavior_events(events: list[dict[str, object]]) -> None:
+    global _behavior_event_generation
+    with _behavior_event_lock:
+        behavior_event_log.clear()
+        behavior_event_log.extend(dict(event) for event in events)
+        _behavior_event_generation += 1
+
+
+def append_behavior_event(event: dict[str, object]) -> None:
+    global _behavior_event_generation
+    with _behavior_event_lock:
+        behavior_event_log.insert(0, dict(event))
+        del behavior_event_log[500:]
+        _behavior_event_generation += 1
+    behavior_event_queue.put(dict(event))
+
+
+def snapshot_behavior_events() -> tuple[int, list[dict[str, object]]]:
+    with _behavior_event_lock:
+        return _behavior_event_generation, [dict(event) for event in behavior_event_log]
+
+
+def set_visible_poll_results(results: dict[str, object] | None) -> None:
+    global visible_poll_results
+    global _poll_results_generation
+    with _poll_results_lock:
+        visible_poll_results = dict(results) if results is not None else None
+        _poll_results_generation += 1
+
+
+def snapshot_visible_poll_results() -> tuple[int, dict[str, object] | None]:
+    with _poll_results_lock:
+        result = dict(visible_poll_results) if visible_poll_results is not None else None
+        return _poll_results_generation, result
 
 
 def safe_set(var: tk.StringVar | None, text: str) -> None:
